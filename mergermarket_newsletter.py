@@ -523,6 +523,25 @@ def _try_click(ctx, selectors: list[str]) -> bool:
     return False
 
 
+def _js_click_by_text(ctx, *phrases: str) -> bool:
+    """
+    Case-insensitive JS fallback: click the first <a>, <button>, or <input>
+    whose visible text / value contains any of the given phrases.
+    Returns True if something was clicked.
+    """
+    return ctx.evaluate("""(phrases) => {
+        const lower = phrases.map(p => p.toLowerCase());
+        const els = Array.from(document.querySelectorAll(
+            'a, button, input[type="button"], input[type="submit"]'
+        ));
+        for (const el of els) {
+            const t = (el.textContent || el.value || '').trim().toLowerCase();
+            if (lower.some(p => t.includes(p))) { el.click(); return true; }
+        }
+        return false;
+    }""", list(phrases))
+
+
 def _trigger_download(page, ctx, output_path: Path):
     """
     Click through the Mergermarket download flow:
@@ -531,47 +550,71 @@ def _trigger_download(page, ctx, output_path: Path):
 
     `page`  – top-level Page object (needed for expect_download + screenshots)
     `ctx`   – Page or Frame that contains the result-page elements
+
+    Each step first tries Playwright CSS/text selectors, then falls back to a
+    JS case-insensitive scan of all clickable elements so capitalisation
+    differences ("Download All" vs "Download all") never block a run.
     """
+    # Give the results page an extra moment to fully render
+    ctx.wait_for_timeout(2_000)
+
     # ── Download all ─────────────────────────────────────────────────────────
     _dump_page_state(page, "04a_before_download_all")
-    clicked = _try_click(ctx, [
-        "a:has-text('Download all')",
-        "button:has-text('Download all')",
-        "input[value='Download all']",
-        "text=Download all",
-    ])
+    clicked = (
+        _try_click(ctx, [
+            "a:has-text('Download all')",
+            "a:has-text('Download All')",
+            "button:has-text('Download all')",
+            "button:has-text('Download All')",
+            "input[value='Download all']",
+            "input[value='Download All']",
+            "text=Download all",
+            "text=Download All",
+        ])
+        or _js_click_by_text(ctx, "download all")
+    )
     if not clicked:
         raise RuntimeError(
-            "'Download all' button not found on the results page.\n"
-            "Check C:\\Temp\\mm_debug_04a_before_download_all.{png,json} — "
-            "did the search return any results?"
+            "'Download all' element not found on the results page.\n"
+            "Open C:\\Temp\\mm_debug_04a_before_download_all.png to see what was there,\n"
+            "or share that file + the .json with Claude to fix the selector."
         )
+    log.info("Clicked 'Download all'")
     page.wait_for_load_state("networkidle", timeout=15_000)
 
     # ── Select 'Unformatted Report' ──────────────────────────────────────────
     _dump_page_state(page, "04b_download_options")
-    _try_click(ctx, [
-        "label:has-text('Unformatted Report')",
-        "input[value='Unformatted Report']",
-        "text=Unformatted Report",
-    ])
+    (
+        _try_click(ctx, [
+            "label:has-text('Unformatted Report')",
+            "input[value='Unformatted Report']",
+            "text=Unformatted Report",
+        ])
+        or _js_click_by_text(ctx, "unformatted report", "unformatted")
+    )
 
     # ── Click Download ───────────────────────────────────────────────────────
-    _try_click(ctx, [
-        "input[value='Download']",
-        "button:has-text('Download')",
-        "a:has-text('Download')",
-    ])
+    (
+        _try_click(ctx, [
+            "input[value='Download']",
+            "button:has-text('Download')",
+            "a:has-text('Download')",
+        ])
+        or _js_click_by_text(ctx, "download")
+    )
     page.wait_for_load_state("networkidle", timeout=15_000)
 
     # ── "Click here to view your report" triggers the actual file download ───
     _dump_page_state(page, "04c_before_view_report")
     with page.expect_download(timeout=90_000) as dl_info:
-        clicked2 = _try_click(ctx, [
-            "text=Click here to view your report",
-            "a:has-text('view your report')",
-            "a:has-text('click here')",
-        ])
+        clicked2 = (
+            _try_click(ctx, [
+                "text=Click here to view your report",
+                "a:has-text('view your report')",
+                "a:has-text('click here')",
+            ])
+            or _js_click_by_text(ctx, "click here to view", "view your report")
+        )
         if not clicked2:
             raise RuntimeError(
                 "'Click here to view your report' link not found.\n"
