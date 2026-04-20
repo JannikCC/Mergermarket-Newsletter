@@ -19,17 +19,22 @@ import ctypes
 import logging
 import os
 import sys
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Constants
+# Paths  (no hardcoded user or drive paths — works on any Windows machine)
 # ---------------------------------------------------------------------------
 
-TEMP_DIR = Path(r"C:\Temp")
-LOG_FILE = TEMP_DIR / "mergermarket_log.txt"
+# Temporary files: raw Excel download, debug screenshots/JSON
+TEMP_DIR = Path(tempfile.gettempdir()) / "mergermarket"
+
+# Persistent output: Word document, log file
+OUTPUT_DIR = Path.home() / "Downloads"
+LOG_FILE = OUTPUT_DIR / "mergermarket_log.txt"
 SEPARATOR = "--------------------------"
 MERGERMARKET_URL = "https://www.mergermarket.com/intelligence/intelligence.asp"
 GEOGRAPHIES = ["Austria", "Germany", "Switzerland"]
@@ -50,6 +55,7 @@ BOILERPLATE_PREFIXES = ("handelsblatt", "mergermarket", "---", "===")
 
 def setup_logging() -> logging.Logger:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("mergermarket")
     logger.setLevel(logging.DEBUG)
     fmt = logging.Formatter(
@@ -258,9 +264,14 @@ def download_mergermarket_report(
         ctx_browser = browser.new_context(accept_downloads=True)
         page = ctx_browser.new_page()
 
-        log.info("Navigating to Mergermarket intelligence page …")
+        # Navigate directly to the intelligence search page.
+        # If the session is not authenticated, the server redirects automatically
+        # to id.ionanalytics.com/signin — _handle_login deals with that and
+        # then navigates back here.  Using domcontentloaded (not networkidle)
+        # so the goto does not hang while the SSO redirect chain is in flight.
+        log.info(f"Navigating to: {MERGERMARKET_URL}")
         try:
-            page.goto(MERGERMARKET_URL, wait_until="networkidle", timeout=30_000)
+            page.goto(MERGERMARKET_URL, wait_until="domcontentloaded", timeout=30_000)
         except PWTimeout:
             _dump_page_state(page, "00_timeout")
             show_error("Mergermarket – Timeout", "Could not load the Mergermarket page within 30 s.")
@@ -650,6 +661,39 @@ def _js_click_by_text(ctx, *phrases: str) -> bool:
     }""", list(phrases))
 
 
+def _validate_excel_download(path: Path) -> None:
+    """
+    Verify the downloaded file is a valid Excel (ZIP) file by checking
+    the magic bytes.  ZIP archives — and therefore all .xlsx files — start
+    with the two bytes  PK  (0x50 0x4B).
+
+    If the file is not a valid ZIP, Mergermarket probably returned an HTML
+    error page instead of the report.  Log a preview and raise a clear error.
+    """
+    try:
+        with open(path, "rb") as fh:
+            header = fh.read(4)
+    except OSError as exc:
+        raise RuntimeError(f"Download fehlgeschlagen – Datei nicht lesbar: {exc}") from exc
+
+    if header[:2] == b"PK":
+        return  # Valid ZIP / Excel
+
+    # Not a ZIP — capture a text preview for the log
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            snippet = fh.read(500)
+    except Exception:
+        snippet = repr(header)
+
+    log.error(f"Downloaded file is not a valid Excel/ZIP. Header bytes: {header!r}")
+    log.error(f"File content preview:\n{snippet}")
+    raise RuntimeError(
+        "Download fehlgeschlagen – Mergermarket hat keine Excel-Datei geliefert.\n"
+        f"Datei-Anfang: {snippet[:200]}"
+    )
+
+
 def _trigger_download(page, ctx, output_path: Path):
     """
     Mergermarket three-step download flow:
@@ -731,7 +775,8 @@ def _trigger_download(page, ctx, output_path: Path):
 
     download = dl_info.value
     download.save_as(str(output_path))
-    log.info(f"Download saved: {output_path}")
+    _validate_excel_download(output_path)
+    log.info(f"Download saved and validated: {output_path}")
     return output_path
 
 
@@ -1059,9 +1104,10 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
 def run(run_date: date, dry_run_xlsx: Optional[Path] = None, headless: bool = False) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    raw_xlsx = TEMP_DIR / f"mergermarket_raw_{today_str}.xlsx"
-    output_docx = TEMP_DIR / f"mergermarket_report_{today_str}.docx"
+    raw_xlsx = TEMP_DIR / f"mergermarket_raw_{today_str}.xlsx"        # temp
+    output_docx = OUTPUT_DIR / f"mergermarket_report_{today_str}.docx"  # Downloads
 
     try:
         # ── Step 1: Download ─────────────────────────────────────────────────
