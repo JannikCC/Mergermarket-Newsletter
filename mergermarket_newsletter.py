@@ -798,29 +798,21 @@ def _trigger_download(page, ctx, output_path: Path):
 
 def parse_excel_report(xlsx_path: Path) -> list[str]:
     """
-    Read column E of the Mergermarket unformatted report and group the cells
-    into report entries.
+    Read the Mergermarket unformatted report using its actual column structure:
 
-    Supports both .xlsx (openpyxl) and .xls / OLE2 (xlrd).
-
-    Structure of column E:
-      [boilerplate / TOC block]
-      --- (separator)
-      Heading of report 1
-      Body paragraph 1
-      Body paragraph 2
-      --- (separator)
-      Heading of report 2
-      ...
+      Row 1 : empty
+      Row 2 : headers — col E = 'Heading', col F = full article text
+      Row 3+: data
 
     Returns a list of newline-joined strings, one per report.
-    The first line of each string is the heading; remaining lines are body text.
+    The first line is the heading (col E); the second line is the article body
+    (col F).  Rows where the Heading cell is empty or missing are skipped.
     """
     log.info(f"Parsing Excel report: {xlsx_path}")
     suffix = xlsx_path.suffix.lower()
 
-    # ── Read raw cell values from column E ───────────────────────────────────
-    raw: list[str] = []
+    entries: list[str] = []
+
     if suffix == ".xls":
         try:
             import xlrd
@@ -832,12 +824,14 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
             raise
         wb = xlrd.open_workbook(str(xlsx_path))
         ws = wb.sheet_by_index(0)
-        for row_idx in range(min(500, ws.nrows)):
-            val = ws.cell_value(row_idx, 4)  # column E = index 4
-            if val is not None and val != "":
-                text = str(val).strip()
-                if text:
-                    raw.append(text)
+        # row 0 = empty, row 1 = headers → data starts at row index 2
+        for row_idx in range(2, ws.nrows):
+            heading = str(ws.cell_value(row_idx, 4)).strip()   # col E
+            if not heading or heading.lower() == "nan":
+                continue
+            body_raw = ws.cell_value(row_idx, 5)               # col F
+            body = str(body_raw).strip() if body_raw not in (None, "") else ""
+            entries.append(f"{heading}\n{body}" if body else heading)
         wb.release_resources()
     else:
         try:
@@ -850,52 +844,18 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
             raise
         wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
         ws = wb.active
-        for row_idx in range(1, 501):
-            val = ws.cell(row=row_idx, column=5).value
-            if val is not None:
-                text = str(val).strip()
-                if text:
-                    raw.append(text)
+        # row 1 = empty, row 2 = headers → data starts at row 3 (1-based)
+        for row_idx in range(3, (ws.max_row or 502) + 1):
+            heading_val = ws.cell(row=row_idx, column=5).value  # col E
+            if heading_val is None or str(heading_val).strip() == "":
+                continue
+            heading = str(heading_val).strip()
+            body_val = ws.cell(row=row_idx, column=6).value     # col F
+            body = str(body_val).strip() if body_val is not None else ""
+            entries.append(f"{heading}\n{body}" if body else heading)
         wb.close()
 
-    # ── Group cells into reports, using separator lines as boundaries ─────────
-    # Discard the TOC block (everything before the first separator).
-    # Skip known boilerplate prefixes and the spurious "Headings" cell.
-    SKIP_EXACT = {"headings"}
-    SKIP_PREFIXES = ("handelsblatt", "mergermarket")
-
-    reports: list[list[str]] = []
-    current: list[str] = []
-    past_first_sep = False
-
-    for text in raw:
-        lower = text.lower()
-
-        # Separator line → flush current group, mark start of real content
-        if lower.startswith("---") or lower.startswith("==="):
-            past_first_sep = True
-            if current:
-                reports.append(current)
-                current = []
-            continue
-
-        # Skip boilerplate headers and noise words
-        if any(lower.startswith(pfx) for pfx in SKIP_PREFIXES):
-            continue
-        if lower in SKIP_EXACT:
-            continue
-
-        if not past_first_sep:
-            continue  # Still in the TOC block — discard
-
-        current.append(text)
-
-    if current:  # last report (file may have no trailing separator)
-        reports.append(current)
-
-    # Each report becomes a newline-joined string: first line = heading, rest = body
-    entries = ["\n".join(group) for group in reports]
-    log.info(f"Found {len(entries)} report entries in column E.")
+    log.info(f"Found {len(entries)} report entries.")
     return entries
 
 
