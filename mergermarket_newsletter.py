@@ -42,7 +42,7 @@ EMAIL_RECIPIENT = "CASE_Germany"
 EMAIL_INTRO = (
     "Guten Morgen,\n\n"
     "anbei ein aktueller Auszug aus Mergermarket.\n\n"
-    "Mergermarket:\n"
+    "Mergermarket:\n"  # rendered bold; blank line added automatically after
 )
 
 # Boilerplate text patterns to skip when parsing the Excel report
@@ -1028,9 +1028,8 @@ def generate_word_document(
             "No intelligence reports were found for today.\nCheck the downloaded Excel file.",
         )
 
-    # Trailing separator and report count
+    # Trailing separator only — report count line intentionally omitted
     doc.add_paragraph(SEPARATOR).style = "Normal"
-    doc.add_paragraph(f"{report_count} Reports").style = "Normal"
 
     # Table of Contents at the very top
     _insert_toc(doc)
@@ -1083,7 +1082,7 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         )
         raise
 
-    subject = f"Mergermarket {run_date.strftime('%d.%m.%Y')}"
+    subject = f"Mergermarket Newsletter - {run_date.strftime('%d.%m.%Y')}"
     doc_path_str = str(word_doc_path.resolve())
 
     # Detect whether any Outlook process (new olk.exe or classic OUTLOOK.EXE)
@@ -1142,7 +1141,10 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
     try:
         mail = outlook.CreateItem(0)  # 0 = olMailItem
         mail.Subject = subject
-        mail.To = EMAIL_RECIPIENT
+
+        # Add recipient and resolve against the address book
+        recipient = mail.Recipients.Add(EMAIL_RECIPIENT)
+        recipient.Resolve()
 
         # Display the email first — WordEditor is only available after Display()
         mail.Display()
@@ -1152,11 +1154,19 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         mail_doc = inspector.WordEditor          # Word.Document COM object
         word_selection = mail_doc.Application.Selection
 
-        # Move to the very start of the body and insert the intro block
+        # Move to the very start of the body and insert the intro block.
+        # "Mergermarket:" is written as bold, followed by a blank line.
         word_selection.HomeKey(Unit=6)  # wdStory = 6
-        for line in EMAIL_INTRO.splitlines():
-            word_selection.TypeText(line)
+        intro_lines = EMAIL_INTRO.splitlines()
+        for line in intro_lines:
+            if line == "Mergermarket:":
+                word_selection.Font.Bold = True
+                word_selection.TypeText(line)
+                word_selection.Font.Bold = False
+            else:
+                word_selection.TypeText(line)
             word_selection.TypeParagraph()
+        word_selection.TypeParagraph()  # blank line between intro and report body
 
         # Copy all content from the source Word document and paste it in
         source_doc.Content.Copy()
