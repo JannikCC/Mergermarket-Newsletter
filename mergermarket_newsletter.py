@@ -782,6 +782,7 @@ def _trigger_download(page, ctx, output_path: Path):
     # but the placeholder path has .xlsx
     if fmt != output_path.suffix.lstrip(".").lower():
         correct_path = output_path.with_suffix(f".{fmt}")
+        correct_path.unlink(missing_ok=True)  # Windows rename fails if target exists
         output_path.rename(correct_path)
         output_path = correct_path
         log.info(f"Renamed to .{fmt}: {output_path}")
