@@ -1,0 +1,6 @@
+playwright
+openpyxl
+xlrd
+python-docx
+pywin32
+schedule
