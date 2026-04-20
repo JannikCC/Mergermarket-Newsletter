@@ -652,21 +652,16 @@ def _js_click_by_text(ctx, *phrases: str) -> bool:
 
 def _trigger_download(page, ctx, output_path: Path):
     """
-    Click through the Mergermarket download flow:
+    Mergermarket three-step download flow:
 
-      Results page  →  'Download all'  →  Download options page
-      →  click #btnUnformattedDownload  (download starts immediately)
-
-    The download options page has two buttons:
-      #btnDownload             – Formatted Report  (do NOT use)
-      #btnUnformattedDownload  – Unformatted Report (Excel, what we want)
-
-    Clicking #btnUnformattedDownload triggers the file download directly;
-    there is no 'Click here to view your report' intermediate step.
+      1. Results page  →  click 'Download all'
+      2. Download options page  →  click #btnUnformattedDownload
+      3. Wait for 'Click here to view your report' link  →  click it
+         (this final click triggers the actual file download)
     """
     ctx.wait_for_timeout(2_000)
 
-    # ── Step 1: Click 'Download all' on the results page ────────────────────
+    # ── Step 1: 'Download all' on the results page ───────────────────────────
     _dump_page_state(page, "04a_before_download_all")
     clicked = (
         _try_click(ctx, [
@@ -676,34 +671,62 @@ def _trigger_download(page, ctx, output_path: Path):
             "button:has-text('Download All')",
             "input[value='Download all']",
             "input[value='Download All']",
-            "text=Download all",
-            "text=Download All",
         ])
         or _js_click_by_text(ctx, "download all")
     )
     if not clicked:
         raise RuntimeError(
             "'Download all' element not found on the results page.\n"
-            "Open C:\\Temp\\mm_debug_04a_before_download_all.png to see what was there."
+            "Open C:\\Temp\\mm_debug_04a_before_download_all.png"
         )
     log.info("Clicked 'Download all'")
     page.wait_for_load_state("networkidle", timeout=15_000)
 
-    # ── Step 2: Click #btnUnformattedDownload — triggers direct file download ─
+    # ── Step 2: click #btnUnformattedDownload ────────────────────────────────
     _dump_page_state(page, "04b_download_options")
-    log.info("Clicking 'Unformatted Download' button (#btnUnformattedDownload) …")
+    log.info("Clicking #btnUnformattedDownload …")
+    clicked2 = _try_click(ctx, [
+        "#btnUnformattedDownload",
+        "input#btnUnformattedDownload",
+        "button#btnUnformattedDownload",
+    ])
+    if not clicked2:
+        raise RuntimeError(
+            "#btnUnformattedDownload not found on the download options page.\n"
+            "Check C:\\Temp\\mm_debug_04b_download_options.{png,json}"
+        )
+    log.info("Clicked #btnUnformattedDownload — waiting for 'Click here' link …")
+
+    # ── Step 3: wait for the 'Click here to view your report' link, then ─────
+    #            click it — this is what actually triggers the file download
+    try:
+        ctx.wait_for_selector(
+            "a:has-text('Click here to view your report')",
+            timeout=20_000,
+        )
+    except Exception:
+        # try broader selector in case text differs slightly
+        try:
+            ctx.wait_for_selector("a:has-text('click here')", timeout=5_000)
+        except Exception:
+            pass
+
+    _dump_page_state(page, "04c_view_report_link")
 
     with page.expect_download(timeout=90_000) as dl_info:
-        clicked2 = _try_click(ctx, [
-            "#btnUnformattedDownload",
-            "input#btnUnformattedDownload",
-            "button#btnUnformattedDownload",
-        ])
-        if not clicked2:
+        clicked3 = (
+            _try_click(ctx, [
+                "a:has-text('Click here to view your report')",
+                "a:has-text('view your report')",
+                "a:has-text('click here')",
+            ])
+            or _js_click_by_text(ctx, "click here to view", "view your report")
+        )
+        if not clicked3:
             raise RuntimeError(
-                "#btnUnformattedDownload not found on the download options page.\n"
-                "Check C:\\Temp\\mm_debug_04b_download_options.{png,json}\n"
-                "Make sure 'Download all' opened the correct options page."
+                "'Click here to view your report' link not found after clicking "
+                "#btnUnformattedDownload.\n"
+                "Check C:\\Temp\\mm_debug_04c_view_report_link.{png,json}"
             )
 
     download = dl_info.value
