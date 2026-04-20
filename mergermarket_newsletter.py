@@ -337,7 +337,7 @@ def download_mergermarket_report(
 
         browser.close()
 
-    return output_path
+    return downloaded
 
 
 # ── Form-interaction helpers (accept Page or Frame as `ctx`) ─────────────────
@@ -657,14 +657,16 @@ def _js_click_by_text(ctx, *phrases: str) -> bool:
     }""", list(phrases))
 
 
-def _validate_excel_download(path: Path) -> None:
+def _validate_excel_download(path: Path) -> str:
     """
-    Verify the downloaded file is a valid Excel (ZIP) file by checking
-    the magic bytes.  ZIP archives — and therefore all .xlsx files — start
-    with the two bytes  PK  (0x50 0x4B).
+    Verify the downloaded file is a real Excel file by inspecting magic bytes.
 
-    If the file is not a valid ZIP, Mergermarket probably returned an HTML
-    error page instead of the report.  Log a preview and raise a clear error.
+    Accepts:
+      - b'PK'                → .xlsx  (ZIP-based Office Open XML)
+      - b'\\xd0\\xcf\\x11\\xe0' → .xls   (OLE2 / BIFF, Office 97–2003)
+
+    Returns 'xlsx' or 'xls'.  Raises RuntimeError with a content preview if
+    the file is neither (e.g. an HTML error page returned by the server).
     """
     try:
         with open(path, "rb") as fh:
@@ -673,16 +675,18 @@ def _validate_excel_download(path: Path) -> None:
         raise RuntimeError(f"Download fehlgeschlagen – Datei nicht lesbar: {exc}") from exc
 
     if header[:2] == b"PK":
-        return  # Valid ZIP / Excel
+        return "xlsx"
+    if header == b"\xd0\xcf\x11\xe0":
+        return "xls"
 
-    # Not a ZIP — capture a text preview for the log
+    # Neither format — capture a text preview for the log
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             snippet = fh.read(500)
     except Exception:
         snippet = repr(header)
 
-    log.error(f"Downloaded file is not a valid Excel/ZIP. Header bytes: {header!r}")
+    log.error(f"Downloaded file is not a valid Excel file. Header bytes: {header!r}")
     log.error(f"File content preview:\n{snippet}")
     raise RuntimeError(
         "Download fehlgeschlagen – Mergermarket hat keine Excel-Datei geliefert.\n"
@@ -772,8 +776,17 @@ def _trigger_download(page, ctx, output_path: Path):
     download = dl_info.value
     log.info(f"Download event captured — suggested filename: {download.suggested_filename!r}")
     download.save_as(str(output_path))
-    _validate_excel_download(output_path)
-    log.info(f"Download saved and validated: {output_path}")
+    fmt = _validate_excel_download(output_path)
+
+    # Rename to the correct extension if the server delivered .xls (OLE2)
+    # but the placeholder path has .xlsx
+    if fmt != output_path.suffix.lstrip(".").lower():
+        correct_path = output_path.with_suffix(f".{fmt}")
+        output_path.rename(correct_path)
+        output_path = correct_path
+        log.info(f"Renamed to .{fmt}: {output_path}")
+
+    log.info(f"Download saved and validated ({fmt}): {output_path}")
     return output_path
 
 
@@ -786,50 +799,69 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
     """
     Read column E (rows 1–500) of the Mergermarket unformatted report.
 
-    Mergermarket's unformatted Excel often begins with a header block
-    (Handelsblatt date, MERGERMARKET title) and an auto-generated TOC before
-    the first separator line.  Everything up to and including the first
-    separator is discarded; each subsequent non-empty cell is one report entry.
-
-    If no separator is found the entire non-boilerplate content is returned,
-    so the function works even when the report layout changes.
+    Supports both .xlsx (openpyxl) and .xls / OLE2 (xlrd).
+    Everything up to and including the first separator line is discarded;
+    each subsequent non-empty cell is one report entry.
     """
-    try:
-        import openpyxl
-    except ImportError:
-        show_error("Mergermarket – Missing dependency", "openpyxl is not installed.\nRun: pip install openpyxl")
-        raise
-
     log.info(f"Parsing Excel report: {xlsx_path}")
-    wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
-    ws = wb.active
+    suffix = xlsx_path.suffix.lower()
 
-    all_cells: list[tuple[str, bool]] = []  # (text, after_first_separator)
+    all_cells: list[tuple[str, bool]] = []
     seen_separator = False
 
-    for row_idx in range(1, 501):
-        val = ws.cell(row=row_idx, column=5).value
-        if val is None:
-            continue
-        text = str(val).strip()
-        if not text:
-            continue
+    if suffix == ".xls":
+        try:
+            import xlrd
+        except ImportError:
+            show_error(
+                "Mergermarket – Missing dependency",
+                "xlrd is not installed.\nRun: pip install xlrd",
+            )
+            raise
+        wb = xlrd.open_workbook(str(xlsx_path))
+        ws = wb.sheet_by_index(0)
+        for row_idx in range(min(500, ws.nrows)):
+            val = ws.cell_value(row_idx, 4)  # column E = index 4
+            if val is None or val == "":
+                continue
+            text = str(val).strip()
+            if not text:
+                continue
+            lower = text.lower()
+            if any(lower.startswith(pfx) for pfx in BOILERPLATE_PREFIXES):
+                if lower.startswith("---") or lower.startswith("==="):
+                    seen_separator = True
+                continue
+            all_cells.append((text, seen_separator))
+        wb.release_resources()
+    else:
+        try:
+            import openpyxl
+        except ImportError:
+            show_error(
+                "Mergermarket – Missing dependency",
+                "openpyxl is not installed.\nRun: pip install openpyxl",
+            )
+            raise
+        wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
+        ws = wb.active
+        for row_idx in range(1, 501):
+            val = ws.cell(row=row_idx, column=5).value
+            if val is None:
+                continue
+            text = str(val).strip()
+            if not text:
+                continue
+            lower = text.lower()
+            if any(lower.startswith(pfx) for pfx in BOILERPLATE_PREFIXES):
+                if lower.startswith("---") or lower.startswith("==="):
+                    seen_separator = True
+                continue
+            all_cells.append((text, seen_separator))
+        wb.close()
 
-        lower = text.lower()
-        # Skip known boilerplate lines
-        if any(lower.startswith(pfx) for pfx in BOILERPLATE_PREFIXES):
-            if lower.startswith("---") or lower.startswith("==="):
-                seen_separator = True
-            continue
-
-        all_cells.append((text, seen_separator))
-
-    wb.close()
-
-    # Prefer entries that came after the first separator (skip the TOC block).
     post_sep = [t for t, after in all_cells if after]
     entries = post_sep if post_sep else [t for t, _ in all_cells]
-
     log.info(f"Found {len(entries)} report entries in column E.")
     return entries
 
@@ -1112,7 +1144,7 @@ def run(run_date: date, dry_run_xlsx: Optional[Path] = None, headless: bool = Fa
             raw_xlsx = dry_run_xlsx
             log.info(f"[DRY-RUN] Skipping browser download; using: {raw_xlsx}")
         else:
-            download_mergermarket_report(run_date, raw_xlsx, headless=headless)
+            raw_xlsx = download_mergermarket_report(run_date, raw_xlsx, headless=headless)
 
         # ── Step 2: Parse ────────────────────────────────────────────────────
         entries = parse_excel_report(raw_xlsx)
