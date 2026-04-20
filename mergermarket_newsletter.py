@@ -745,20 +745,26 @@ def _trigger_download(page, ctx, output_path: Path):
     #            Find it first, then click inside expect_download so the
     #            Playwright download handler is already registered when the
     #            browser starts the file transfer.
-    log.info("Waiting for 'Click here to view your report' link …")
+    log.info("Waiting for 'Click here to view your report' link (up to 60 s) …")
     link_el = None
-    for sel in [
+    _LINK_SELECTORS = [
         "a:has-text('Click here to view your report')",
         "a:has-text('view your report')",
         "a:has-text('click here')",
-    ]:
-        try:
-            link_el = ctx.wait_for_selector(sel, timeout=7_000)
-            if link_el:
-                log.info(f"Found download link via: {sel!r}")
-                break
-        except Exception:
-            continue
+    ]
+    for attempt in range(30):  # 30 × 2 s = 60 s max
+        for sel in _LINK_SELECTORS:
+            try:
+                link_el = ctx.wait_for_selector(sel, timeout=2_000)
+                if link_el:
+                    log.info(f"Found download link via {sel!r} (attempt {attempt + 1}/30)")
+                    break
+            except Exception:
+                continue
+        if link_el:
+            break
+        log.debug(f"Link not yet visible — waiting 2 s (attempt {attempt + 1}/30) …")
+        ctx.wait_for_timeout(2_000)
 
     _dump_page_state(page, "04c_view_report_link")
 
