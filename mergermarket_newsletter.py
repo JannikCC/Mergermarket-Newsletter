@@ -541,21 +541,42 @@ def _set_date_range(ctx, date_from: date, date_to: date) -> None:
 
 
 def _select_last_24h(ctx) -> None:
-    """Click the 'Last 24 Hours' radio (the one whose siblings include a <select>)."""
-    ctx.evaluate("""() => {
-        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-        for (const r of radios) {
-            let el = r.nextElementSibling;
-            for (let i = 0; i < 4; i++) {
-                if (!el) break;
-                if (el.tagName === 'SELECT') { r.click(); return; }
-                el = el.nextElementSibling;
-            }
+    """
+    Select 'Last 24 Hours' from the daterange <select> dropdown.
+
+    The page has a radio + <select> pair for the "quick range" option.
+    Clicking the radio is not enough — the <select> retains its previous
+    value (e.g. 'Last 12 Months').  We find the <select> that contains a
+    'Last 24 Hours' option and set it explicitly, then also click the
+    associated radio so the form registers the correct mode.
+    """
+    result = ctx.evaluate("""() => {
+        // Find the <select> whose options include 'Last 24 Hours'
+        const sel = Array.from(document.querySelectorAll('select')).find(s =>
+            Array.from(s.options).some(o => o.text.trim() === 'Last 24 Hours')
+        );
+        if (!sel) return false;
+
+        // Set the value to the 'Last 24 Hours' option
+        const opt = Array.from(sel.options).find(o => o.text.trim() === 'Last 24 Hours');
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('change', {bubbles: true}));
+
+        // Also click the radio button that owns this <select>, if present
+        let el = sel.previousElementSibling;
+        for (let i = 0; i < 4; i++) {
+            if (!el) break;
+            if (el.tagName === 'INPUT' && el.type === 'radio') { el.click(); break; }
+            el = el.previousElementSibling;
         }
-        if (radios[0]) radios[0].click();
+        return opt.value;
     }""")
+
+    if result is False:
+        log.warning("_select_last_24h: <select> with 'Last 24 Hours' option not found — check page structure")
+    else:
+        log.info(f"Date mode set to 'Last 24 Hours' (option value={result!r})")
     ctx.wait_for_timeout(300)
-    log.info("Date mode set to 'Last 24 Hours'")
 
 
 def _select_geographies(ctx, countries: list[str]) -> None:
@@ -1278,9 +1299,10 @@ def compose_outlook_email(
         mail = outlook.CreateItem(0)  # 0 = olMailItem
         mail.Subject = subject
 
-        # Add recipient and resolve against the address book
-        recipient = mail.Recipients.Add(EMAIL_RECIPIENT)
-        recipient.Resolve()
+        # Add recipients and resolve against the address book
+        for addr in [EMAIL_RECIPIENT, "sonke.debuhr@casecassiopea.com"]:
+            r = mail.Recipients.Add(addr)
+            r.Resolve()
 
         # Display the email so the WordEditor becomes available for body edits.
         mail.Display()
