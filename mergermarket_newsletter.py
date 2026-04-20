@@ -798,18 +798,29 @@ def _trigger_download(page, ctx, output_path: Path):
 
 def parse_excel_report(xlsx_path: Path) -> list[str]:
     """
-    Read column E (rows 1–500) of the Mergermarket unformatted report.
+    Read column E of the Mergermarket unformatted report and group the cells
+    into report entries.
 
     Supports both .xlsx (openpyxl) and .xls / OLE2 (xlrd).
-    Everything up to and including the first separator line is discarded;
-    each subsequent non-empty cell is one report entry.
+
+    Structure of column E:
+      [boilerplate / TOC block]
+      --- (separator)
+      Heading of report 1
+      Body paragraph 1
+      Body paragraph 2
+      --- (separator)
+      Heading of report 2
+      ...
+
+    Returns a list of newline-joined strings, one per report.
+    The first line of each string is the heading; remaining lines are body text.
     """
     log.info(f"Parsing Excel report: {xlsx_path}")
     suffix = xlsx_path.suffix.lower()
 
-    all_cells: list[tuple[str, bool]] = []
-    seen_separator = False
-
+    # ── Read raw cell values from column E ───────────────────────────────────
+    raw: list[str] = []
     if suffix == ".xls":
         try:
             import xlrd
@@ -823,17 +834,10 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
         ws = wb.sheet_by_index(0)
         for row_idx in range(min(500, ws.nrows)):
             val = ws.cell_value(row_idx, 4)  # column E = index 4
-            if val is None or val == "":
-                continue
-            text = str(val).strip()
-            if not text:
-                continue
-            lower = text.lower()
-            if any(lower.startswith(pfx) for pfx in BOILERPLATE_PREFIXES):
-                if lower.startswith("---") or lower.startswith("==="):
-                    seen_separator = True
-                continue
-            all_cells.append((text, seen_separator))
+            if val is not None and val != "":
+                text = str(val).strip()
+                if text:
+                    raw.append(text)
         wb.release_resources()
     else:
         try:
@@ -848,21 +852,49 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
         ws = wb.active
         for row_idx in range(1, 501):
             val = ws.cell(row=row_idx, column=5).value
-            if val is None:
-                continue
-            text = str(val).strip()
-            if not text:
-                continue
-            lower = text.lower()
-            if any(lower.startswith(pfx) for pfx in BOILERPLATE_PREFIXES):
-                if lower.startswith("---") or lower.startswith("==="):
-                    seen_separator = True
-                continue
-            all_cells.append((text, seen_separator))
+            if val is not None:
+                text = str(val).strip()
+                if text:
+                    raw.append(text)
         wb.close()
 
-    post_sep = [t for t, after in all_cells if after]
-    entries = post_sep if post_sep else [t for t, _ in all_cells]
+    # ── Group cells into reports, using separator lines as boundaries ─────────
+    # Discard the TOC block (everything before the first separator).
+    # Skip known boilerplate prefixes and the spurious "Headings" cell.
+    SKIP_EXACT = {"headings"}
+    SKIP_PREFIXES = ("handelsblatt", "mergermarket")
+
+    reports: list[list[str]] = []
+    current: list[str] = []
+    past_first_sep = False
+
+    for text in raw:
+        lower = text.lower()
+
+        # Separator line → flush current group, mark start of real content
+        if lower.startswith("---") or lower.startswith("==="):
+            past_first_sep = True
+            if current:
+                reports.append(current)
+                current = []
+            continue
+
+        # Skip boilerplate headers and noise words
+        if any(lower.startswith(pfx) for pfx in SKIP_PREFIXES):
+            continue
+        if lower in SKIP_EXACT:
+            continue
+
+        if not past_first_sep:
+            continue  # Still in the TOC block — discard
+
+        current.append(text)
+
+    if current:  # last report (file may have no trailing separator)
+        reports.append(current)
+
+    # Each report becomes a newline-joined string: first line = heading, rest = body
+    entries = ["\n".join(group) for group in reports]
     log.info(f"Found {len(entries)} report entries in column E.")
     return entries
 
@@ -905,19 +937,7 @@ def _insert_toc(document) -> None:
 
     body = document.element.body
 
-    # TOC label paragraph
-    label_p = OxmlElement("w:p")
-    label_r = OxmlElement("w:r")
-    label_rPr = OxmlElement("w:rPr")
-    label_b = OxmlElement("w:b")
-    label_rPr.append(label_b)
-    label_r.append(label_rPr)
-    label_t = OxmlElement("w:t")
-    label_t.text = "Table of Contents"
-    label_r.append(label_t)
-    label_p.append(label_r)
-
-    # TOC field paragraph
+    # TOC field paragraph only — no "Table of Contents" heading.
     # Switches: \h = hyperlinks, \z = hide in web layout, \n = no page numbers,
     #           \o "1-1" = include only Heading 1
     field_p = OxmlElement("w:p")
@@ -953,9 +973,7 @@ def _insert_toc(document) -> None:
     field_p.append(placeholder_r)
     field_p.append(end_r)
 
-    # Insert both paragraphs before all existing body content
     body.insert(0, field_p)
-    body.insert(0, label_p)
 
 
 def _apply_heading_formatting(paragraph, font_name: str = "Aptos") -> None:
@@ -1020,9 +1038,9 @@ def generate_word_document(
         # Separator line before each report
         doc.add_paragraph(SEPARATOR).style = "Normal"
 
-        # First line → Heading 1
+        # First line → Heading 1 (prefixed with report number for the TOC)
         heading_para = doc.add_paragraph()
-        heading_para.add_run(lines[0])
+        heading_para.add_run(f"{report_count}. {lines[0]}")
         _apply_heading_formatting(heading_para, font_name=heading_font)
 
         # Remaining lines → Normal body text
@@ -1075,10 +1093,29 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         )
         raise
 
+    import subprocess as _sp
+
     subject = f"Mergermarket {run_date.strftime('%d.%m.%Y')}"
     doc_path_str = str(word_doc_path.resolve())
 
-    log.info("Launching Outlook …")
+    # Start Outlook if it is not already running.
+    # COM Dispatch on a non-running Outlook can raise "Server execution failed".
+    try:
+        tasklist = _sp.run(
+            ["tasklist", "/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"],
+            capture_output=True, text=True, timeout=10,
+        )
+        outlook_running = "OUTLOOK.EXE" in tasklist.stdout.upper()
+    except Exception:
+        outlook_running = False  # can't tell — assume we need to start it
+
+    if not outlook_running:
+        log.info("Outlook not running — starting …")
+        _sp.Popen(["outlook.exe"])
+        time.sleep(10)
+    else:
+        log.info("Outlook already running — connecting via COM …")
+
     try:
         outlook = win32com.client.Dispatch("Outlook.Application")
     except Exception as exc:
