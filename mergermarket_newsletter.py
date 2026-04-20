@@ -830,115 +830,88 @@ def _get_bka_aktenzeichen() -> list[str]:
 
 def scrape_bundeskartellamt(page, aktenzeichen_list: list[str]) -> list[dict]:
     """
-    Search the BKA 'Laufende Verfahren' form for each Aktenzeichen and return
-    a list of dicts with keys: datum, aktenzeichen, unternehmen,
-    produktbereich, abschluss.
+    Load the BKA Laufende Verfahren page once, set the 'Zeige' dropdown to its
+    maximum value so all entries appear on a single page, parse the HTML table
+    (columns: Datum, Aktenzeichen, Unternehmen, Produktbereich, Abschluss),
+    and return only the rows whose Aktenzeichen matches aktenzeichen_list.
 
-    Searches are performed one at a time so that the results are unambiguous.
-    An empty / error placeholder row is added for any AZ not found.
+    Rows not found in the table get a placeholder entry so the email table
+    stays complete.
     """
-    results: list[dict] = []
+    log.info("BKA: loading Laufende Verfahren page …")
+    page.goto(BKA_URL, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(1_500)
+    _dump_page_state(page, "bka_01_initial")
 
-    for az in aktenzeichen_list:
-        log.info(f"BKA: searching {az} …")
+    # Set the 'Zeige' (page-size) dropdown to its highest option so that all
+    # entries load on a single page — avoids pagination handling.
+    changed = page.evaluate("""() => {
+        const selects = Array.from(document.querySelectorAll('select'));
+        const ps = selects.find(s =>
+            /anzahl|pagesize|zeige|perpage|rows/i.test(s.name + ' ' + s.id + ' ' +
+                (s.previousElementSibling?.textContent || ''))
+            || Array.from(s.options).some(o => ['10','25','50','100'].includes(o.value.trim()))
+        );
+        if (!ps) return false;
+        const opts = Array.from(ps.options).filter(o => parseInt(o.value) > 0);
+        if (!opts.length) return false;
+        const maxOpt = opts.reduce((a, b) => parseInt(b.value) > parseInt(a.value) ? b : a);
+        ps.value = maxOpt.value;
+        ps.dispatchEvent(new Event('change', {bubbles: true}));
+        return maxOpt.value;
+    }""")
+
+    if changed:
+        log.info(f"BKA: 'Zeige' dropdown set to {changed}")
         try:
-            page.goto(BKA_URL, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(1_500)
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            page.wait_for_timeout(2_000)
+    else:
+        log.warning("BKA: 'Zeige' dropdown not found — using default page size")
 
-            # Fill the Aktenzeichen search field (try common attribute patterns)
-            filled = False
-            for sel in [
-                "input[name*='aktenzeichen' i]",
-                "input[id*='aktenzeichen' i]",
-                "input[placeholder*='Aktenzeichen' i]",
-                "input[name*='az' i]",
-                "input[type='search']",
-                "input[type='text']",
-            ]:
-                el = page.query_selector(sel)
-                if el:
-                    el.fill(az)
-                    filled = True
-                    log.debug(f"BKA: filled {sel!r} with {az!r}")
-                    break
+    _dump_page_state(page, "bka_02_full_list")
 
-            if not filled:
-                _dump_page_state(page, "bka_no_input")
-                log.warning("BKA: Aktenzeichen input not found — check bka_no_input.png")
-                # No point trying more AZ if the page structure is unknown
-                results.append(_bka_empty(az, "Eingabefeld nicht gefunden"))
-                break
+    # Parse every <tr> with <td> cells from all tables on the page.
+    # Columns are positional: 0=Datum, 1=Aktenzeichen, 2=Unternehmen,
+    # 3=Produktbereich, 4=Abschluss (as stated by the user).
+    all_rows: list[list[str]] = page.evaluate("""() =>
+        Array.from(document.querySelectorAll('table tr'))
+            .map(tr => Array.from(tr.querySelectorAll('td'))
+                           .map(td => td.textContent.trim()))
+            .filter(cells => cells.length >= 2)
+    """)
 
-            # Submit the search form
-            for sel in [
-                "button[type='submit']",
-                "input[type='submit']",
-                "button.submit",
-                ".btn-search",
-                "button",
-            ]:
-                el = page.query_selector(sel)
-                if el:
-                    el.click()
-                    break
+    log.info(f"BKA: {len(all_rows)} data rows found in page tables")
 
-            page.wait_for_load_state("networkidle", timeout=20_000)
+    # Build lookup: normalised AZ → row dict
+    az_set = {az.strip() for az in aktenzeichen_list}
+    found: dict[str, dict] = {}
 
-            # Extract matching row(s) from the results page
-            row_data: list[dict] = page.evaluate("""(az) => {
-                const out = [];
+    for cells in all_rows:
+        az_cell = cells[1] if len(cells) > 1 else ""
+        az_norm = " ".join(az_cell.split())  # collapse whitespace
+        if az_norm in az_set:
+            found[az_norm] = {
+                "datum":          cells[0] if len(cells) > 0 else "",
+                "aktenzeichen":   az_norm,
+                "unternehmen":    cells[2] if len(cells) > 2 else "",
+                "produktbereich": cells[3] if len(cells) > 3 else "",
+                "abschluss":      cells[4] if len(cells) > 4 else "",
+            }
 
-                // Strategy A: look for <table> rows containing the AZ text
-                for (const row of document.querySelectorAll('table tr')) {
-                    const cells = Array.from(row.querySelectorAll('td'));
-                    if (cells.length < 2) continue;
-                    const texts = cells.map(c => c.textContent.trim());
-                    if (!texts.some(t => t === az || t.replace(/\\s+/g,'') === az.replace(/\\s+/g,'')))
-                        continue;
-                    out.push({
-                        datum:          texts[0] || '',
-                        aktenzeichen:   texts.find(t => /[A-Z]\\d+-\\d+\\/\\d+/.test(t)) || az,
-                        unternehmen:    texts[2] || '',
-                        produktbereich: texts[3] || '',
-                        abschluss:      texts[4] || '',
-                    });
-                }
-                if (out.length) return out;
+    # Return rows in the original aktenzeichen_list order; add placeholders
+    # for any AZ that was not present in the table.
+    results: list[dict] = []
+    for az in aktenzeichen_list:
+        az = az.strip()
+        if az in found:
+            results.append(found[az])
+        else:
+            log.warning(f"BKA: {az} not found in table")
+            results.append(_bka_empty(az, "—"))
 
-                // Strategy B: definition lists / article / card layout
-                for (const block of document.querySelectorAll(
-                        'dl, article, .result, .treffer, .item, li')) {
-                    if (!block.textContent.includes(az)) continue;
-                    const get = (sels) => {
-                        for (const s of sels) {
-                            const el = block.querySelector(s);
-                            if (el) return el.textContent.trim();
-                        }
-                        return '';
-                    };
-                    out.push({
-                        datum:          get(['.datum','[class*="date"]','time','dt:first-of-type + dd']),
-                        aktenzeichen:   az,
-                        unternehmen:    get(['.unternehmen','[class*="company"]','[class*="name"]']),
-                        produktbereich: get(['.produkt','[class*="product"]','[class*="sector"]']),
-                        abschluss:      get(['.abschluss','[class*="status"]','[class*="close"]']),
-                    });
-                }
-                return out;
-            }""", az)
-
-            if row_data:
-                results.extend(row_data)
-                log.info(f"BKA: {len(row_data)} result(s) for {az}")
-            else:
-                _dump_page_state(page, f"bka_noresult_{az.replace('/', '_')}")
-                log.warning(f"BKA: no data found for {az}")
-                results.append(_bka_empty(az, "—"))
-
-        except Exception as exc:
-            log.warning(f"BKA: error for {az}: {exc}")
-            results.append(_bka_empty(az, f"Fehler: {exc}"))
-
+    log.info(f"BKA: {len(found)}/{len(aktenzeichen_list)} Aktenzeichen matched")
     return results
 
 
