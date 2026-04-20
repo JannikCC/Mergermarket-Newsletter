@@ -456,21 +456,17 @@ def _handle_login(page, username: str, password: str) -> None:
         log.info("No submit button found — pressing Enter in password field")
         pw_field.press("Enter")
 
-    log.info("Login submitted — waiting for authentication to complete …")
+    log.info("Login submitted — waiting 3 s then navigating to intelligence page …")
 
-    # ── Wait for auth, then navigate explicitly to the target page ───────────
-    # The SSO may land on mergermarket.ionanalytics.com/deals or similar.
-    # We always navigate to MERGERMARKET_URL afterwards so the script
-    # continues from the correct starting point regardless of where SSO drops us.
-    try:
-        # Accept any mergermarket / ionanalytics domain as "logged in"
-        page.wait_for_url("*mergermarket*", timeout=30_000)
-        log.info(f"Authentication complete — landed on: {page.url[:80]}")
-    except Exception:
-        page.wait_for_load_state("networkidle", timeout=20_000)
-
-    log.info(f"Navigating to intelligence search page: {MERGERMARKET_URL}")
-    page.goto(MERGERMARKET_URL, wait_until="networkidle", timeout=30_000)
+    # ── Navigate immediately after submit — no URL polling ───────────────────
+    # The SSO redirect can take an unpredictable amount of time.  Rather than
+    # waiting for a specific URL pattern (which can block for 30 s+), we
+    # simply give the auth flow 3 seconds to set its cookies, then navigate
+    # directly to the target page.  If the session was not actually established,
+    # the page will redirect back to the SSO and the login block will re-run.
+    page.wait_for_timeout(3_000)
+    log.info(f"Navigating to: {MERGERMARKET_URL}")
+    page.goto(MERGERMARKET_URL, wait_until="domcontentloaded", timeout=30_000)
     log.info(f"Ready: {page.url[:80]}")
 
 
@@ -741,39 +737,40 @@ def _trigger_download(page, ctx, output_path: Path):
         )
     log.info("Clicked #btnUnformattedDownload — waiting for 'Click here' link …")
 
-    # ── Step 3: wait for the 'Click here to view your report' link, then ─────
-    #            click it — this is what actually triggers the file download
-    try:
-        ctx.wait_for_selector(
-            "a:has-text('Click here to view your report')",
-            timeout=20_000,
-        )
-    except Exception:
-        # try broader selector in case text differs slightly
+    # ── Step 3: locate the 'Click here to view your report' link ─────────────
+    #            Find it first, then click inside expect_download so the
+    #            Playwright download handler is already registered when the
+    #            browser starts the file transfer.
+    log.info("Waiting for 'Click here to view your report' link …")
+    link_el = None
+    for sel in [
+        "a:has-text('Click here to view your report')",
+        "a:has-text('view your report')",
+        "a:has-text('click here')",
+    ]:
         try:
-            ctx.wait_for_selector("a:has-text('click here')", timeout=5_000)
+            link_el = ctx.wait_for_selector(sel, timeout=7_000)
+            if link_el:
+                log.info(f"Found download link via: {sel!r}")
+                break
         except Exception:
-            pass
+            continue
 
     _dump_page_state(page, "04c_view_report_link")
 
-    with page.expect_download(timeout=90_000) as dl_info:
-        clicked3 = (
-            _try_click(ctx, [
-                "a:has-text('Click here to view your report')",
-                "a:has-text('view your report')",
-                "a:has-text('click here')",
-            ])
-            or _js_click_by_text(ctx, "click here to view", "view your report")
+    if not link_el:
+        raise RuntimeError(
+            "'Click here to view your report' link not found after clicking "
+            "#btnUnformattedDownload.\n"
+            f"Check {TEMP_DIR}\\mm_debug_04c_view_report_link.png"
         )
-        if not clicked3:
-            raise RuntimeError(
-                "'Click here to view your report' link not found after clicking "
-                "#btnUnformattedDownload.\n"
-                "Check C:\\Temp\\mm_debug_04c_view_report_link.{png,json}"
-            )
+
+    log.info("Clicking download link inside expect_download context …")
+    with page.expect_download(timeout=90_000) as dl_info:
+        link_el.click()
 
     download = dl_info.value
+    log.info(f"Download event captured — suggested filename: {download.suggested_filename!r}")
     download.save_as(str(output_path))
     _validate_excel_download(output_path)
     log.info(f"Download saved and validated: {output_path}")
