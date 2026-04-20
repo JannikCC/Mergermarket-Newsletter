@@ -1031,7 +1031,31 @@ def generate_word_document(
 
     doc.save(str(output_path))
     log.info(f"Word document saved: {output_path}  ({report_count} reports)")
+
+    _refresh_toc(output_path)
+
     return output_path
+
+
+def _refresh_toc(docx_path: Path) -> None:
+    """Open the saved .docx in Word via COM, update the TOC field, and save."""
+    try:
+        import win32com.client
+    except ImportError:
+        log.warning("pywin32 not available — TOC placeholder will remain; update manually.")
+        return
+    try:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(str(docx_path.resolve()))
+        doc.TablesOfContents(1).Update()
+        doc.Save()
+        doc.Close()
+        if word.Documents.Count == 0:
+            word.Quit()
+        log.info("TOC updated and document re-saved.")
+    except Exception as exc:
+        log.warning(f"TOC auto-update failed ({exc}) — open the document and press Ctrl+A → F9.")
 
 
 # ---------------------------------------------------------------------------
@@ -1070,8 +1094,15 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         outlook_running = False  # can't tell — assume we need to start it
 
     if not outlook_running:
-        log.info("Outlook not running — starting …")
-        _sp.Popen(["outlook.exe"])
+        log.info("Outlook not running — locating and starting …")
+        import glob as _glob
+        candidates = (
+            _glob.glob(r"C:\Program Files\Microsoft Office\root\Office*\OUTLOOK.EXE")
+            + _glob.glob(r"C:\Program Files (x86)\Microsoft Office\root\Office*\OUTLOOK.EXE")
+        )
+        outlook_exe = candidates[0] if candidates else "outlook.exe"
+        log.info(f"Outlook executable: {outlook_exe}")
+        _sp.Popen([outlook_exe])
         time.sleep(10)
     else:
         log.info("Outlook already running — connecting via COM …")
