@@ -1083,31 +1083,34 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         )
         raise
 
-    import subprocess as _sp
-
     subject = f"Mergermarket {run_date.strftime('%d.%m.%Y')}"
     doc_path_str = str(word_doc_path.resolve())
 
-    # Start Outlook if it is not already running.
-    # COM Dispatch on a non-running Outlook can raise "Server execution failed".
+    # Detect whether any Outlook process (new olk.exe or classic OUTLOOK.EXE)
+    # is already running so we can skip the launch-and-wait cycle.
+    import subprocess as _sp
+    import glob as _glob
+
     try:
-        tasklist = _sp.run(
-            ["tasklist", "/FI", "IMAGENAME eq OUTLOOK.EXE", "/NH"],
+        tasklist_out = _sp.run(
+            ["tasklist", "/NH"],
             capture_output=True, text=True, timeout=10,
-        )
-        outlook_running = "OUTLOOK.EXE" in tasklist.stdout.upper()
+        ).stdout.upper()
+        outlook_running = "OLK.EXE" in tasklist_out or "OUTLOOK.EXE" in tasklist_out
     except Exception:
         outlook_running = False  # can't tell — assume we need to start it
 
     if not outlook_running:
-        log.info("Outlook not running — locating and starting …")
-        import glob as _glob
-        candidates = (
+        # Prefer new Outlook (olk.exe) over the classic Office installation.
+        olk_candidates = _glob.glob(
+            str(Path.home() / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "olk.exe")
+        )
+        classic_candidates = (
             _glob.glob(r"C:\Program Files\Microsoft Office\root\Office*\OUTLOOK.EXE")
             + _glob.glob(r"C:\Program Files (x86)\Microsoft Office\root\Office*\OUTLOOK.EXE")
         )
-        outlook_exe = candidates[0] if candidates else "outlook.exe"
-        log.info(f"Outlook executable: {outlook_exe}")
+        outlook_exe = (olk_candidates or classic_candidates or ["outlook.exe"])[0]
+        log.info(f"Outlook not running — starting: {outlook_exe}")
         _sp.Popen([outlook_exe])
     else:
         log.info("Outlook already running — connecting via COM …")
