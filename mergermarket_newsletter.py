@@ -156,12 +156,18 @@ def download_mergermarket_report(
         log.info("Selecting geographies: Austria, Germany, Switzerland …")
         _select_geographies(page, GEOGRAPHIES)
 
+        # The page has two Search buttons (one mid-form, one at the very bottom
+        # after the Geography / Further Parameters section).  We always click
+        # the last one so geography selections are included in the query.
         log.info("Submitting search …")
-        _try_click(page, [
-            "input[value='Search']",
-            "button:has-text('Search')",
-            "[type='submit']",
-        ])
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(300)
+        search_btns = page.locator("input[value='Search']")
+        if search_btns.count() > 0:
+            search_btns.last.scroll_into_view_if_needed()
+            search_btns.last.click()
+        else:
+            _try_click(page, ["button:text-is('Search')", "input[type='submit']"])
         page.wait_for_load_state("networkidle", timeout=30_000)
 
         log.info("Initiating report download …")
@@ -198,52 +204,176 @@ def _handle_login(page, username: str, password: str) -> None:
 
 
 def _set_date_range(page, date_from: date, date_to: date) -> None:
-    """Fill the 'Date from' / 'Date to' fields."""
-    for sel in ["input[name='datefrom']", "input[id*='datefrom']", "input[placeholder*='From']"]:
-        if page.query_selector(sel):
-            page.fill(sel, fmt_dmy(date_from))
-            break
-    for sel in ["input[name='dateto']", "input[id*='dateto']", "input[placeholder*='To']"]:
-        if page.query_selector(sel):
-            page.fill(sel, fmt_dmy(date_to))
-            break
+    """
+    Activate the 'Date From / Date To' radio and fill in both text inputs.
+
+    Page structure (from live screenshot):
+      ● [radio]  Last 24 Hours  [<select>]
+      ○ [radio]  Date From [text input]  Date To [text input]  Clear Date
+
+    The custom-date radio is the one whose siblings do NOT include a <select>.
+    """
+    # Click the radio that activates the text inputs (not the one next to the dropdown)
+    page.evaluate("""() => {
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+        for (const r of radios) {
+            let el = r.nextElementSibling;
+            let hasSelect = false;
+            for (let i = 0; i < 4; i++) {
+                if (!el) break;
+                if (el.tagName === 'SELECT') { hasSelect = true; break; }
+                el = el.nextElementSibling;
+            }
+            if (!hasSelect) { r.click(); return; }
+        }
+    }""")
+    page.wait_for_timeout(400)
+
+    # Fill the two date text inputs.  Strategy: identify them by surrounding
+    # label text ('Date From' / 'Date To'); fall back to positional order.
+    page.evaluate(f"""() => {{
+        const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+
+        let fromEl = null, toEl = null;
+        for (const inp of inputs) {{
+            const ctx = (inp.parentElement?.textContent ?? '') +
+                        (inp.parentElement?.parentElement?.textContent ?? '');
+            if (!fromEl && ctx.includes('Date From')) {{ fromEl = inp; continue; }}
+            if (!toEl   && ctx.includes('Date To'))   {{ toEl   = inp; continue; }}
+        }}
+        if (!fromEl && inputs[0]) fromEl = inputs[0];
+        if (!toEl   && inputs[1]) toEl   = inputs[1];
+
+        const set = (el, val) => {{
+            if (!el) return;
+            el.value = val;
+            ['input', 'change', 'blur'].forEach(ev =>
+                el.dispatchEvent(new Event(ev, {{bubbles: true}})));
+        }};
+        set(fromEl, '{fmt_dmy(date_from)}');
+        set(toEl,   '{fmt_dmy(date_to)}');
+    }}""")
+    log.info(f"Date range set: {fmt_dmy(date_from)} → {fmt_dmy(date_to)}")
 
 
 def _select_last_24h(page) -> None:
-    """Choose 'Last 24 Hours' from the date-range dropdown."""
-    for sel in ["select[name='daterange']", "select[id*='daterange']", "select[name*='period']"]:
-        if page.query_selector(sel):
-            page.select_option(sel, label="Last 24 Hours")
-            return
-    # Fallback: click a radio/option matching the label text
-    _try_click(page, ["text=Last 24 Hours", "label:has-text('Last 24 Hours')"])
+    """
+    Click the 'Last 24 Hours' radio (the one whose siblings include a <select>).
+
+    The dropdown is typically already set to 'Last 24 Hours' by default, so
+    clicking the radio is usually sufficient.
+    """
+    page.evaluate("""() => {
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+        for (const r of radios) {
+            let el = r.nextElementSibling;
+            for (let i = 0; i < 4; i++) {
+                if (!el) break;
+                if (el.tagName === 'SELECT') { r.click(); return; }
+                el = el.nextElementSibling;
+            }
+        }
+        // Fallback: first radio on the page is the Last 24 Hours radio
+        if (radios[0]) radios[0].click();
+    }""")
+    page.wait_for_timeout(300)
+    log.info("Date mode set to 'Last 24 Hours'")
 
 
 def _select_geographies(page, countries: list[str]) -> None:
-    """Ctrl+click the named countries in the geography multi-select."""
-    # Try to expand Western Europe section first
-    for label in ["Western Europe", "Europe"]:
-        expander = page.query_selector(f"text={label}")
-        if expander:
-            expander.click()
-            time.sleep(0.4)
-            break
+    """
+    Geography uses 4 cascading <select> elements (visible in the
+    'Further Search Parameters' section):
 
-    for idx, country in enumerate(countries):
-        # Try different element types that could represent the option
-        for pattern in [
-            f"label:has-text('{country}')",
-            f"input[value='{country}']",
-            f"option:has-text('{country}')",
-            f"li:has-text('{country}')",
-        ]:
-            locator = page.locator(pattern)
-            if locator.count() > 0:
-                mods = ["Control"] if idx > 0 else []
-                locator.first.click(modifiers=mods)
-                break
-        else:
-            log.warning(f"Geography option not found: {country}")
+      Col 1: Continent   (Africa / Americas / Asia / Europe / Middle East)
+           ↓ cascade
+      Col 2: Sub-region  (Western Europe / Northern Europe / …)
+           ↓ cascade
+      Col 3: Country     (Austria / Germany / Switzerland / …)
+      Col 4: (sub-area, unused)
+
+    We trigger each cascade level by setting option.selected and dispatching
+    a 'change' event — no name/id attributes required.
+    """
+    # ── Step 1: select 'Europe' in the continent column ─────────────────────
+    ok1 = page.evaluate("""() => {
+        const sels = Array.from(document.querySelectorAll('select'));
+        const s = sels.find(sel => {
+            const opts = Array.from(sel.options).map(o => o.text.trim());
+            return opts.includes('Europe') && opts.includes('Americas');
+        });
+        if (!s) return false;
+        Array.from(s.options).forEach(o => { o.selected = o.text.trim() === 'Europe'; });
+        s.dispatchEvent(new Event('change', {bubbles: true}));
+        return true;
+    }""")
+    if not ok1:
+        log.warning("Geography: continent <select> not found — check page structure")
+        return
+    log.info("Geography: continent 'Europe' selected")
+
+    # Wait for 'Western Europe' to appear in column 2
+    try:
+        page.wait_for_function(
+            "() => Array.from(document.querySelectorAll('select option'))"
+            "       .some(o => o.text.trim() === 'Western Europe')",
+            timeout=6_000,
+        )
+    except Exception:
+        page.wait_for_timeout(2_000)
+
+    # ── Step 2: select 'Western Europe' in the sub-region column ────────────
+    ok2 = page.evaluate("""() => {
+        const sels = Array.from(document.querySelectorAll('select'));
+        const s = sels.find(sel =>
+            Array.from(sel.options).some(o => o.text.trim() === 'Western Europe')
+        );
+        if (!s) return false;
+        Array.from(s.options).forEach(o => { o.selected = o.text.trim() === 'Western Europe'; });
+        s.dispatchEvent(new Event('change', {bubbles: true}));
+        return true;
+    }""")
+    if not ok2:
+        log.warning("Geography: sub-region <select> for 'Western Europe' not found after cascade")
+        return
+    log.info("Geography: sub-region 'Western Europe' selected")
+
+    # Wait for country options to appear in column 3
+    try:
+        page.wait_for_function(
+            f"() => Array.from(document.querySelectorAll('select option'))"
+            f"       .some(o => o.text.trim() === 'Germany')",
+            timeout=6_000,
+        )
+    except Exception:
+        page.wait_for_timeout(2_000)
+
+    # ── Step 3: multi-select the target countries ────────────────────────────
+    result = page.evaluate("""(targets) => {
+        const sels = Array.from(document.querySelectorAll('select'));
+        const s = sels.find(sel =>
+            targets.some(c => Array.from(sel.options).some(o => o.text.trim() === c))
+        );
+        if (!s) return {found: false};
+        const matched = [];
+        Array.from(s.options).forEach(o => {
+            if (targets.includes(o.text.trim())) { o.selected = true; matched.push(o.text.trim()); }
+        });
+        s.dispatchEvent(new Event('change', {bubbles: true}));
+        return {found: true, matched};
+    }""", countries)
+
+    if not result.get("found"):
+        log.warning(
+            "Geography: country <select> not found after cascade. "
+            "Austria / Germany / Switzerland options were not available."
+        )
+    else:
+        matched = result.get("matched", [])
+        missing = [c for c in countries if c not in matched]
+        log.info(f"Geography: selected {matched}")
+        if missing:
+            log.warning(f"Geography: options not found for {missing}")
 
 
 def _try_click(page, selectors: list[str]) -> bool:
@@ -261,37 +391,67 @@ def _try_click(page, selectors: list[str]) -> bool:
 
 
 def _trigger_download(page, output_path: Path):
-    """Click through the download dialog and capture the resulting file."""
-    # Click "Download all"
-    _try_click(page, [
-        "text=Download all",
+    """
+    Click through the Mergermarket download flow:
+      Search results → Download all → Unformatted Report → Download
+      → Click here to view your report  (triggers the file download)
+
+    Screenshots are saved to TEMP_DIR\\mm_dl_*.png for debugging if a step
+    fails, without interrupting the run.
+    """
+    def _snap(name: str) -> None:
+        try:
+            page.screenshot(path=str(TEMP_DIR / f"mm_dl_{name}.png"), full_page=False)
+        except Exception:
+            pass
+
+    # ── Download all ─────────────────────────────────────────────────────────
+    _snap("01_results")
+    clicked = _try_click(page, [
         "a:has-text('Download all')",
         "button:has-text('Download all')",
+        "input[value='Download all']",
+        "text=Download all",
     ])
+    if not clicked:
+        log.error(
+            "Could not find 'Download all' button on the results page.\n"
+            f"Screenshot saved to {TEMP_DIR}\\mm_dl_01_results.png — "
+            "check whether the search returned any results."
+        )
+        raise RuntimeError("'Download all' button not found on results page")
     page.wait_for_load_state("networkidle", timeout=15_000)
+    _snap("02_download_options")
 
-    # Select "Unformatted Report" in the Other Reports section
+    # ── Select 'Unformatted Report' ──────────────────────────────────────────
     _try_click(page, [
-        "text=Unformatted Report",
         "label:has-text('Unformatted Report')",
         "input[value='Unformatted Report']",
+        "text=Unformatted Report",
     ])
 
-    # Click the Download button
+    # ── Click Download ───────────────────────────────────────────────────────
     _try_click(page, [
-        "button:has-text('Download')",
         "input[value='Download']",
+        "button:has-text('Download')",
         "a:has-text('Download')",
     ])
     page.wait_for_load_state("networkidle", timeout=15_000)
+    _snap("03_after_download_click")
 
-    # "Click here to view your report" triggers the actual file download
+    # ── Click here to view your report → triggers the actual file download ───
     with page.expect_download(timeout=90_000) as dl_info:
-        _try_click(page, [
+        clicked2 = _try_click(page, [
             "text=Click here to view your report",
             "a:has-text('view your report')",
             "a:has-text('click here')",
         ])
+        if not clicked2:
+            log.error(
+                "'Click here to view your report' link not found.\n"
+                f"Screenshot saved to {TEMP_DIR}\\mm_dl_03_after_download_click.png"
+            )
+            raise RuntimeError("Download trigger link not found")
 
     download = dl_info.value
     download.save_as(str(output_path))
