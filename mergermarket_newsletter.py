@@ -1168,12 +1168,32 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
             word_selection.TypeParagraph()
         word_selection.TypeParagraph()  # blank line between intro and report body
 
+        # Resolve first name: prefer Outlook's current-user display name,
+        # fall back to the Windows USERNAME env var.
+        try:
+            display_name = outlook.Session.CurrentUser.Name
+            first_name = display_name.split()[0] if display_name else ""
+        except Exception:
+            first_name = ""
+        if not first_name:
+            win_user = os.environ.get("USERNAME", "")
+            # "J. Schmid" → "J", "jan.schmid" → "jan", "Jan Schmid" → "Jan"
+            raw = win_user.replace(".", " ").split()[0] if win_user else ""
+            first_name = raw.capitalize()
+
         # Copy all content from the source Word document and paste it in
         source_doc.Content.Copy()
         word_selection.EndKey(Unit=6)  # move to end before pasting
         word_selection.Paste()
 
-        log.info("Outlook email composed and displayed — ready for manual review.")
+        # Append closing signature after the pasted report
+        word_selection.EndKey(Unit=6)
+        word_selection.TypeParagraph()
+        word_selection.TypeText("Beste Grüße")
+        word_selection.TypeParagraph()
+        word_selection.TypeText(first_name)
+
+        log.info(f"Outlook email composed and displayed (signed as {first_name!r}).")
 
     finally:
         source_doc.Close(SaveChanges=False)
