@@ -1314,10 +1314,12 @@ def compose_outlook_email(
             for line in FRIDAY_INTRO.splitlines():
                 word_selection.TypeText(line)
                 word_selection.TypeParagraph()
+            word_selection.TypeParagraph()  # blank line after intro sentence
 
             # ── Bundeskartellamt section ──────────────────────────────────────
             _bold("Bundeskartellamt:")
             word_selection.TypeParagraph()
+            word_selection.TypeParagraph()  # blank line before table
 
             _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
                             "Produktbereich", "Abschluss"]
@@ -1328,12 +1330,26 @@ def compose_outlook_email(
                 NumRows=1 + len(bka_data),
                 NumColumns=len(_BKA_HEADERS),
             )
+
+            # Header row: dark-blue background (#000068) with white text
+            # Word COM colors: int = R + G*256 + B*65536
+            _DARK_BLUE = 0x68 * 65536   # R=0 G=0 B=104 → #000068
+            _WHITE     = 0xFF + 0xFF * 256 + 0xFF * 65536
             for j, h in enumerate(_BKA_HEADERS, 1):
-                tbl.Cell(1, j).Range.Text = h
-                tbl.Cell(1, j).Range.Font.Bold = True
+                cell = tbl.Cell(1, j)
+                cell.Range.Text = h
+                cell.Range.Font.Bold = True
+                cell.Range.Font.Color = _WHITE
+                cell.Shading.BackgroundPatternColor = _DARK_BLUE
+
+            # Data rows
             for i, row in enumerate(bka_data, 2):
                 for j, key in enumerate(_BKA_KEYS, 1):
                     tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
+
+            # Column widths: Unternehmen (col 3) and Produktbereich (col 4) → 80.5 pt
+            tbl.Columns(3).Width = 80.5
+            tbl.Columns(4).Width = 80.5
 
             # Move cursor past the table
             word_selection.EndKey(Unit=6)
