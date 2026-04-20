@@ -332,27 +332,106 @@ def download_mergermarket_report(
 # ── Form-interaction helpers (accept Page or Frame as `ctx`) ─────────────────
 
 def _handle_login(page, username: str, password: str) -> None:
-    """Submit login form if one is present on the page."""
-    if not page.query_selector("input[type='password']"):
-        log.info("No login form detected — session already authenticated.")
+    """
+    Handle ION Analytics SSO login for Mergermarket.
+
+    Detection: URL-based, not DOM-based.  The SSO provider redirects to
+    id.ionanalytics.com/signin?onSuccess=… before the actual Mergermarket
+    page loads.  A password-field check would miss this because the field
+    is injected dynamically after the username step.
+
+    Two-step flow:
+      1. Fill username/email  →  click Continue / Next / Sign in
+      2. Wait for password field to appear  →  fill  →  click Sign in
+      3. Wait for redirect back to *.mergermarket.com/*
+    """
+    url = page.url.lower()
+
+    # Detect login page by URL (primary signal)
+    on_login_page = (
+        "ionanalytics.com" in url
+        or "/signin" in url
+        or "/login" in url
+        or "/auth/" in url
+        or "mergermarket.com" not in url   # still on a redirect/SSO host
+    )
+
+    if not on_login_page:
+        log.info(f"Already on Mergermarket — skipping login ({page.url[:70]})")
         return
+
+    log.info(f"Login / SSO page detected: {page.url[:80]}")
+
     if not username or not password:
         show_error(
             "Mergermarket – Login Required",
-            "A login page was detected but MM_USERNAME / MM_PASSWORD are not set.\n"
-            "Export them as environment variables and retry.",
+            "Redirected to login page but MM_USERNAME / MM_PASSWORD are not set.\n"
+            "Set them as environment variables:\n"
+            "  setx MM_USERNAME \"you@company.com\"\n"
+            "  setx MM_PASSWORD \"yourpassword\"",
         )
         raise RuntimeError("MM_USERNAME / MM_PASSWORD not configured")
 
-    log.info("Login form detected — submitting credentials …")
-    for sel in ["input[name='username']", "input[type='email']", "input[name='email']"]:
+    # ── Step 1: username / email ─────────────────────────────────────────────
+    for sel in [
+        "input[type='email']",
+        "input[name='email']",
+        "input[name='username']",
+        "input[name='identifier']",
+        "input[type='text']",
+    ]:
         if page.query_selector(sel):
             page.fill(sel, username)
+            log.info(f"Filled username/email via {sel!r}")
             break
-    page.fill("input[type='password']", password)
-    _try_click(page, ["button[type='submit']", "input[type='submit']"])
-    page.wait_for_load_state("networkidle", timeout=20_000)
-    log.info("Login submitted.")
+    else:
+        log.warning("Could not find a username/email field on the login page")
+
+    # Click Continue / Next — many SSO flows show the password on the next screen
+    _try_click(page, [
+        "button:has-text('Continue')",
+        "button:has-text('Next')",
+        "input[value='Continue']",
+        "input[value='Next']",
+        "button[type='submit']",
+        "input[type='submit']",
+    ])
+
+    # Wait up to 5 s for the password field to appear (two-step flow)
+    try:
+        page.wait_for_selector("input[type='password']", timeout=5_000)
+        log.info("Password field appeared after Continue step")
+    except Exception:
+        pass  # Field may already be visible (single-step form)
+
+    # ── Step 2: password ─────────────────────────────────────────────────────
+    if page.query_selector("input[type='password']"):
+        page.fill("input[type='password']", password)
+        log.info("Filled password field")
+    else:
+        log.warning("Password field still not visible — login may fail")
+
+    _try_click(page, [
+        "button:has-text('Sign in')",
+        "button:has-text('Sign In')",
+        "button:has-text('Log in')",
+        "button:has-text('Login')",
+        "button[type='submit']",
+        "input[type='submit']",
+    ])
+    log.info("Login submitted — waiting for redirect to Mergermarket …")
+
+    # ── Wait for redirect back to mergermarket.com ───────────────────────────
+    try:
+        page.wait_for_url("*mergermarket.com*", timeout=30_000)
+        log.info(f"Redirect complete → {page.url[:80]}")
+    except Exception:
+        page.wait_for_load_state("networkidle", timeout=20_000)
+        if "mergermarket.com" not in page.url.lower():
+            log.warning(
+                f"Still not on mergermarket.com after login — current URL: {page.url[:80]}\n"
+                "Check mm_debug_01_after_login.png to see the current state."
+            )
 
 
 def _set_date_range(ctx, date_from: date, date_to: date) -> None:
