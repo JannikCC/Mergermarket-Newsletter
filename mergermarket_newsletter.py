@@ -405,33 +405,62 @@ def _handle_login(page, username: str, password: str) -> None:
         pass  # Field may already be visible (single-step form)
 
     # ── Step 2: password ─────────────────────────────────────────────────────
-    if page.query_selector("input[type='password']"):
+    pw_field = page.query_selector("input[type='password']")
+    if pw_field:
         page.fill("input[type='password']", password)
         log.info("Filled password field")
     else:
         log.warning("Password field still not visible — login may fail")
 
-    _try_click(page, [
+    # Submit: try CSS selectors first, then JS scan (case-insensitive), then Enter key.
+    # The Enter-key fallback is the most reliable across all SSO implementations.
+    submitted = _try_click(page, [
+        "button[type='submit']",
+        "input[type='submit']",
         "button:has-text('Sign in')",
         "button:has-text('Sign In')",
         "button:has-text('Log in')",
         "button:has-text('Login')",
-        "button[type='submit']",
-        "input[type='submit']",
     ])
-    log.info("Login submitted — waiting for redirect to Mergermarket …")
 
-    # ── Wait for redirect back to mergermarket.com ───────────────────────────
+    if not submitted:
+        # JS fallback: find any submit/button whose text contains a login keyword
+        submitted = page.evaluate("""() => {
+            const terms = ['sign in', 'log in', 'login', 'submit', 'continue'];
+            // Prefer explicit submit buttons
+            const submits = Array.from(
+                document.querySelectorAll('button[type="submit"], input[type="submit"]')
+            );
+            if (submits.length) { submits[submits.length - 1].click(); return true; }
+            // Fall back to any button with matching text
+            for (const el of document.querySelectorAll('button, input[type="button"]')) {
+                const t = (el.textContent || el.value || '').trim().toLowerCase();
+                if (terms.some(kw => t.includes(kw))) { el.click(); return true; }
+            }
+            return false;
+        }""")
+
+    if not submitted and pw_field:
+        # Last resort: press Enter in the password field
+        log.info("No submit button found — pressing Enter in password field")
+        pw_field.press("Enter")
+
+    log.info("Login submitted — waiting for authentication to complete …")
+
+    # ── Wait for auth, then navigate explicitly to the target page ───────────
+    # The SSO may land on mergermarket.ionanalytics.com/deals or similar.
+    # We always navigate to MERGERMARKET_URL afterwards so the script
+    # continues from the correct starting point regardless of where SSO drops us.
     try:
-        page.wait_for_url("*mergermarket.com*", timeout=30_000)
-        log.info(f"Redirect complete → {page.url[:80]}")
+        # Accept any mergermarket / ionanalytics domain as "logged in"
+        page.wait_for_url("*mergermarket*", timeout=30_000)
+        log.info(f"Authentication complete — landed on: {page.url[:80]}")
     except Exception:
         page.wait_for_load_state("networkidle", timeout=20_000)
-        if "mergermarket.com" not in page.url.lower():
-            log.warning(
-                f"Still not on mergermarket.com after login — current URL: {page.url[:80]}\n"
-                "Check mm_debug_01_after_login.png to see the current state."
-            )
+
+    log.info(f"Navigating to intelligence search page: {MERGERMARKET_URL}")
+    page.goto(MERGERMARKET_URL, wait_until="networkidle", timeout=30_000)
+    log.info(f"Ready: {page.url[:80]}")
 
 
 def _set_date_range(ctx, date_from: date, date_to: date) -> None:
