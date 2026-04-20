@@ -1278,9 +1278,10 @@ def compose_outlook_email(
         mail = outlook.CreateItem(0)  # 0 = olMailItem
         mail.Subject = subject
 
-        # Add recipient and resolve against the address book
-        recipient = mail.Recipients.Add(EMAIL_RECIPIENT)
-        recipient.Resolve()
+        # Add recipients and resolve against the address book
+        for addr in [EMAIL_RECIPIENT, "sonke.debuhr@casecassiopea.com"]:
+            r = mail.Recipients.Add(addr)
+            r.Resolve()
 
         # Display the email so the WordEditor becomes available for body edits.
         mail.Display()
