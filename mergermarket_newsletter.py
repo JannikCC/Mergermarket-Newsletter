@@ -44,6 +44,21 @@ EMAIL_INTRO = (
     "anbei ein aktueller Auszug aus Mergermarket.\n\n"
     "Mergermarket:\n"  # rendered bold; blank line added automatically after
 )
+FRIDAY_INTRO = (
+    "Guten Morgen,\n\n"
+    "anbei die laufenden Verfahren des Bundeskartellamts und ein aktueller "
+    "Auszug aus Mergermarket.\n"
+)
+
+BKA_URL = (
+    "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/"
+    "LaufendeVerfahren/LaufendeVerfahren_Formular.html"
+)
+BKA_DEFAULT_AKTENZEICHEN = (
+    "B3-56/26,B3-55/26,B11-43/26,B3-54/26,B9-48/26,B1-67/26,"
+    "B2-27/26,B3-53/26,B11-44/26,B11-45/26,B7-34/26,B7-32/26,"
+    "B7-33/26,B4-38/26,B1-68/26"
+)
 
 # Boilerplate text patterns to skip when parsing the Excel report
 BOILERPLATE_PREFIXES = ("handelsblatt", "mergermarket", "---", "===")
@@ -238,7 +253,8 @@ def download_mergermarket_report(
     output_path: Path,
     *,
     headless: bool = False,
-) -> Path:
+    is_friday: bool = False,
+) -> tuple[Path, list[dict]]:
     """
     Navigate Mergermarket via Playwright, configure the search, and download
     the Unformatted Report Excel file to *output_path*.
@@ -335,9 +351,14 @@ def download_mergermarket_report(
         downloaded = _trigger_download(page, ctx, output_path)
         log.info(f"Report saved to: {downloaded}")
 
+        bka_data: list[dict] = []
+        if is_friday:
+            log.info("Friday run — scraping Bundeskartellamt …")
+            bka_data = scrape_bundeskartellamt(page, _get_bka_aktenzeichen())
+
         browser.close()
 
-    return downloaded
+    return downloaded, bka_data
 
 
 # ── Form-interaction helpers (accept Page or Frame as `ctx`) ─────────────────
@@ -798,6 +819,135 @@ def _trigger_download(page, ctx, output_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Bundeskartellamt scraping (Friday only)
+# ---------------------------------------------------------------------------
+
+
+def _get_bka_aktenzeichen() -> list[str]:
+    raw = os.environ.get("BKA_AKTENZEICHEN", BKA_DEFAULT_AKTENZEICHEN)
+    return [az.strip() for az in raw.split(",") if az.strip()]
+
+
+def scrape_bundeskartellamt(page, aktenzeichen_list: list[str]) -> list[dict]:
+    """
+    Search the BKA 'Laufende Verfahren' form for each Aktenzeichen and return
+    a list of dicts with keys: datum, aktenzeichen, unternehmen,
+    produktbereich, abschluss.
+
+    Searches are performed one at a time so that the results are unambiguous.
+    An empty / error placeholder row is added for any AZ not found.
+    """
+    results: list[dict] = []
+
+    for az in aktenzeichen_list:
+        log.info(f"BKA: searching {az} …")
+        try:
+            page.goto(BKA_URL, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(1_500)
+
+            # Fill the Aktenzeichen search field (try common attribute patterns)
+            filled = False
+            for sel in [
+                "input[name*='aktenzeichen' i]",
+                "input[id*='aktenzeichen' i]",
+                "input[placeholder*='Aktenzeichen' i]",
+                "input[name*='az' i]",
+                "input[type='search']",
+                "input[type='text']",
+            ]:
+                el = page.query_selector(sel)
+                if el:
+                    el.fill(az)
+                    filled = True
+                    log.debug(f"BKA: filled {sel!r} with {az!r}")
+                    break
+
+            if not filled:
+                _dump_page_state(page, "bka_no_input")
+                log.warning("BKA: Aktenzeichen input not found — check bka_no_input.png")
+                # No point trying more AZ if the page structure is unknown
+                results.append(_bka_empty(az, "Eingabefeld nicht gefunden"))
+                break
+
+            # Submit the search form
+            for sel in [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button.submit",
+                ".btn-search",
+                "button",
+            ]:
+                el = page.query_selector(sel)
+                if el:
+                    el.click()
+                    break
+
+            page.wait_for_load_state("networkidle", timeout=20_000)
+
+            # Extract matching row(s) from the results page
+            row_data: list[dict] = page.evaluate("""(az) => {
+                const out = [];
+
+                // Strategy A: look for <table> rows containing the AZ text
+                for (const row of document.querySelectorAll('table tr')) {
+                    const cells = Array.from(row.querySelectorAll('td'));
+                    if (cells.length < 2) continue;
+                    const texts = cells.map(c => c.textContent.trim());
+                    if (!texts.some(t => t === az || t.replace(/\\s+/g,'') === az.replace(/\\s+/g,'')))
+                        continue;
+                    out.push({
+                        datum:          texts[0] || '',
+                        aktenzeichen:   texts.find(t => /[A-Z]\\d+-\\d+\\/\\d+/.test(t)) || az,
+                        unternehmen:    texts[2] || '',
+                        produktbereich: texts[3] || '',
+                        abschluss:      texts[4] || '',
+                    });
+                }
+                if (out.length) return out;
+
+                // Strategy B: definition lists / article / card layout
+                for (const block of document.querySelectorAll(
+                        'dl, article, .result, .treffer, .item, li')) {
+                    if (!block.textContent.includes(az)) continue;
+                    const get = (sels) => {
+                        for (const s of sels) {
+                            const el = block.querySelector(s);
+                            if (el) return el.textContent.trim();
+                        }
+                        return '';
+                    };
+                    out.push({
+                        datum:          get(['.datum','[class*="date"]','time','dt:first-of-type + dd']),
+                        aktenzeichen:   az,
+                        unternehmen:    get(['.unternehmen','[class*="company"]','[class*="name"]']),
+                        produktbereich: get(['.produkt','[class*="product"]','[class*="sector"]']),
+                        abschluss:      get(['.abschluss','[class*="status"]','[class*="close"]']),
+                    });
+                }
+                return out;
+            }""", az)
+
+            if row_data:
+                results.extend(row_data)
+                log.info(f"BKA: {len(row_data)} result(s) for {az}")
+            else:
+                _dump_page_state(page, f"bka_noresult_{az.replace('/', '_')}")
+                log.warning(f"BKA: no data found for {az}")
+                results.append(_bka_empty(az, "—"))
+
+        except Exception as exc:
+            log.warning(f"BKA: error for {az}: {exc}")
+            results.append(_bka_empty(az, f"Fehler: {exc}"))
+
+    return results
+
+
+def _bka_empty(az: str, note: str) -> dict:
+    return {"datum": "", "aktenzeichen": az, "unternehmen": note,
+            "produktbereich": "—", "abschluss": "—"}
+
+
+# ---------------------------------------------------------------------------
 # Step 2 – Parse the Raw Excel Report
 # ---------------------------------------------------------------------------
 
@@ -1068,7 +1218,13 @@ def _refresh_toc(docx_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
+def compose_outlook_email(
+    word_doc_path: Path,
+    run_date: date,
+    *,
+    bka_data: list[dict] | None = None,
+    is_friday: bool = False,
+) -> None:
     """
     Create a new Outlook MailItem, insert the intro text and the content of
     the Word document, then display it so the user can review before sending.
@@ -1082,7 +1238,13 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         )
         raise
 
-    subject = f"Mergermarket Newsletter - {run_date.strftime('%d.%m.%Y')}"
+    if is_friday:
+        subject = (
+            f"Laufende Verfahren Bundeskartellamt und Mergermarket Newsletter"
+            f" - {run_date.strftime('%d.%m.%Y')}"
+        )
+    else:
+        subject = f"Mergermarket Newsletter - {run_date.strftime('%d.%m.%Y')}"
     doc_path_str = str(word_doc_path.resolve())
 
     # Detect whether any Outlook process (new olk.exe or classic OUTLOOK.EXE)
@@ -1154,20 +1316,6 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         mail_doc = inspector.WordEditor          # Word.Document COM object
         word_selection = mail_doc.Application.Selection
 
-        # Move to the very start of the body and insert the intro block.
-        # "Mergermarket:" is written as bold, followed by a blank line.
-        word_selection.HomeKey(Unit=6)  # wdStory = 6
-        intro_lines = EMAIL_INTRO.splitlines()
-        for line in intro_lines:
-            if line == "Mergermarket:":
-                word_selection.Font.Bold = True
-                word_selection.TypeText(line)
-                word_selection.Font.Bold = False
-            else:
-                word_selection.TypeText(line)
-            word_selection.TypeParagraph()
-        word_selection.TypeParagraph()  # blank line between intro and report body
-
         # Resolve first name: prefer Outlook's current-user display name,
         # fall back to the Windows USERNAME env var.
         try:
@@ -1177,16 +1325,69 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
             first_name = ""
         if not first_name:
             win_user = os.environ.get("USERNAME", "")
-            # "J. Schmid" → "J", "jan.schmid" → "jan", "Jan Schmid" → "Jan"
             raw = win_user.replace(".", " ").split()[0] if win_user else ""
             first_name = raw.capitalize()
 
-        # Copy all content from the source Word document and paste it in
+        # ── Helper ────────────────────────────────────────────────────────────
+        def _bold(text: str) -> None:
+            word_selection.Font.Bold = True
+            word_selection.TypeText(text)
+            word_selection.Font.Bold = False
+
+        word_selection.HomeKey(Unit=6)  # wdStory = 6
+
+        if is_friday and bka_data:
+            # ── Friday intro ──────────────────────────────────────────────────
+            for line in FRIDAY_INTRO.splitlines():
+                word_selection.TypeText(line)
+                word_selection.TypeParagraph()
+
+            # ── Bundeskartellamt section ──────────────────────────────────────
+            _bold("Bundeskartellamt:")
+            word_selection.TypeParagraph()
+
+            _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
+                            "Produktbereich", "Abschluss"]
+            _BKA_KEYS    = ["datum", "aktenzeichen", "unternehmen",
+                            "produktbereich", "abschluss"]
+            tbl = mail_doc.Tables.Add(
+                Range=word_selection.Range,
+                NumRows=1 + len(bka_data),
+                NumColumns=len(_BKA_HEADERS),
+            )
+            for j, h in enumerate(_BKA_HEADERS, 1):
+                tbl.Cell(1, j).Range.Text = h
+                tbl.Cell(1, j).Range.Font.Bold = True
+            for i, row in enumerate(bka_data, 2):
+                for j, key in enumerate(_BKA_KEYS, 1):
+                    tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
+
+            # Move cursor past the table
+            word_selection.EndKey(Unit=6)
+            word_selection.TypeParagraph()
+            word_selection.TypeParagraph()
+
+            # ── Mergermarket label ────────────────────────────────────────────
+            _bold("Mergermarket:")
+            word_selection.TypeParagraph()
+            word_selection.TypeParagraph()
+
+        else:
+            # ── Normal day intro ──────────────────────────────────────────────
+            for line in EMAIL_INTRO.splitlines():
+                if line == "Mergermarket:":
+                    _bold(line)
+                else:
+                    word_selection.TypeText(line)
+                word_selection.TypeParagraph()
+            word_selection.TypeParagraph()
+
+        # ── Paste Mergermarket report ─────────────────────────────────────────
         source_doc.Content.Copy()
-        word_selection.EndKey(Unit=6)  # move to end before pasting
+        word_selection.EndKey(Unit=6)
         word_selection.Paste()
 
-        # Append closing signature after the pasted report
+        # ── Closing signature ─────────────────────────────────────────────────
         word_selection.EndKey(Unit=6)
         word_selection.TypeParagraph()
         word_selection.TypeText("Beste Grüße")
@@ -1206,10 +1407,19 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run(run_date: date, dry_run_xlsx: Optional[Path] = None, headless: bool = False) -> None:
+def run(
+    run_date: date,
+    dry_run_xlsx: Optional[Path] = None,
+    headless: bool = False,
+    force_friday: bool = False,
+) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    is_friday = force_friday or (run_date.weekday() == 4)
+    if is_friday:
+        log.info("Friday mode active — BKA scraping enabled.")
 
     raw_xlsx = TEMP_DIR / f"mergermarket_raw_{today_str}.xlsx"        # temp
     output_docx = OUTPUT_DIR / f"mergermarket_report_{today_str}.docx"  # Downloads
@@ -1218,9 +1428,12 @@ def run(run_date: date, dry_run_xlsx: Optional[Path] = None, headless: bool = Fa
         # ── Step 1: Download ─────────────────────────────────────────────────
         if dry_run_xlsx:
             raw_xlsx = dry_run_xlsx
+            bka_data: list[dict] = []
             log.info(f"[DRY-RUN] Skipping browser download; using: {raw_xlsx}")
         else:
-            raw_xlsx = download_mergermarket_report(run_date, raw_xlsx, headless=headless)
+            raw_xlsx, bka_data = download_mergermarket_report(
+                run_date, raw_xlsx, headless=headless, is_friday=is_friday
+            )
 
         # ── Step 2: Parse ────────────────────────────────────────────────────
         entries = parse_excel_report(raw_xlsx)
@@ -1235,7 +1448,9 @@ def run(run_date: date, dry_run_xlsx: Optional[Path] = None, headless: bool = Fa
         generate_word_document(entries, output_docx, run_date)
 
         # ── Step 4: Compose email ────────────────────────────────────────────
-        compose_outlook_email(output_docx, run_date)
+        compose_outlook_email(
+            output_docx, run_date, bka_data=bka_data, is_friday=is_friday
+        )
 
     except Exception as exc:
         log.exception("Fatal error in Mergermarket newsletter automation")
@@ -1304,6 +1519,11 @@ def main() -> None:
         action="store_true",
         help="Run the browser in headless mode (no visible window).",
     )
+    parser.add_argument(
+        "--friday",
+        action="store_true",
+        help="Force Friday mode: scrape Bundeskartellamt and use the extended email format.",
+    )
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
@@ -1312,9 +1532,10 @@ def main() -> None:
     if args.schedule:
         start_scheduler(date_override=args.date, headless=args.headless)
     elif args.dry_run:
-        run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless)
+        run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
+            force_friday=args.friday)
     else:
-        run(run_date, headless=args.headless)
+        run(run_date, headless=args.headless, force_friday=args.friday)
 
 
 if __name__ == "__main__":
