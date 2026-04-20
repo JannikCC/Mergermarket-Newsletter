@@ -1103,15 +1103,23 @@ def compose_outlook_email(word_doc_path: Path, run_date: date) -> None:
         outlook_exe = candidates[0] if candidates else "outlook.exe"
         log.info(f"Outlook executable: {outlook_exe}")
         _sp.Popen([outlook_exe])
-        time.sleep(10)
     else:
         log.info("Outlook already running — connecting via COM …")
 
-    try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-    except Exception as exc:
-        show_error("Mergermarket – Outlook Error", f"Could not connect to Outlook:\n{exc}")
-        raise
+    outlook = None
+    for attempt in range(1, 31):
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            log.info(f"Outlook COM connection established (attempt {attempt}/30)")
+            break
+        except Exception:
+            log.info(f"Waiting for Outlook... (attempt {attempt}/30)")
+            time.sleep(5)
+
+    if outlook is None:
+        msg = "Outlook did not become ready within 2.5 minutes."
+        show_error("Mergermarket – Outlook Error", msg)
+        raise RuntimeError(msg)
 
     log.info("Opening Word document via COM …")
     try:
