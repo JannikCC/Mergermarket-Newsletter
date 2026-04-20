@@ -1283,23 +1283,7 @@ def compose_outlook_email(
         recipient.Resolve()
 
         # Display the email so the WordEditor becomes available for body edits.
-        # With --send: also ask the user for confirmation and auto-send after 60 s.
         mail.Display()
-
-        if auto_send:
-            MB_OKCANCEL       = 0x01
-            MB_ICONINFORMATION = 0x40
-            IDOK = 1
-            result = ctypes.windll.user32.MessageBoxW(
-                0,
-                "Mergermarket Newsletter wird in 60 Sekunden automatisch versendet.\n"
-                "Klicke Abbrechen um den Versand zu stoppen.",
-                "Mergermarket – Automatischer Versand",
-                MB_OKCANCEL | MB_ICONINFORMATION,
-            )
-            if result == IDOK:
-                log.info("Auto-send confirmed — waiting 60 s …")
-                time.sleep(60)
 
         # Get the embedded Word editor for the message body
         inspector = mail.GetInspector
@@ -1405,7 +1389,7 @@ def compose_outlook_email(
         word_selection.TypeParagraph()
         word_selection.TypeText(first_name)
 
-        if auto_send and result == IDOK:
+        if auto_send:
             mail.Send()
             log.info("Email sent automatically.")
         else:
@@ -1511,10 +1495,7 @@ def main() -> None:
     parser.add_argument(
         "--send",
         action="store_true",
-        help=(
-            "After composing the email, show a 60-second confirmation dialog. "
-            "If confirmed, send automatically; otherwise open for manual review."
-        ),
+        help="Send the email automatically via mail.Send(). Without this flag the email is only displayed for manual review.",
     )
     args = parser.parse_args()
 
