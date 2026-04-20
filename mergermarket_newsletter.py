@@ -1347,10 +1347,14 @@ def compose_outlook_email(
                 for j, key in enumerate(_BKA_KEYS, 1):
                     tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
 
-            # Column widths: Unternehmen (col 3) and Produktbereich (col 4) → 488 px
-            _col_width_pt = mail_doc.Application.PixelsToPoints(488, False)
+            # Column widths: Unternehmen (col 3) and Produktbereich (col 4) → 550 px
+            _col_width_pt = mail_doc.Application.PixelsToPoints(550, False)
             tbl.Columns(3).Width = _col_width_pt
             tbl.Columns(4).Width = _col_width_pt
+
+            # Outside borders: solid black (#000000)
+            tbl.Borders.OutsideLineStyle = 1  # wdLineStyleSingle
+            tbl.Borders.OutsideColor = 0      # wdColorBlack
 
             # Move cursor past the table
             word_selection.EndKey(Unit=6)
