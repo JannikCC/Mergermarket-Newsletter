@@ -1197,6 +1197,7 @@ def compose_outlook_email(
     *,
     bka_data: list[dict] | None = None,
     is_friday: bool = False,
+    auto_send: bool = False,
 ) -> None:
     """
     Create a new Outlook MailItem, insert the intro text and the content of
@@ -1281,8 +1282,24 @@ def compose_outlook_email(
         recipient = mail.Recipients.Add(EMAIL_RECIPIENT)
         recipient.Resolve()
 
-        # Display the email first — WordEditor is only available after Display()
+        # Display the email so the WordEditor becomes available for body edits.
+        # With --send: also ask the user for confirmation and auto-send after 60 s.
         mail.Display()
+
+        if auto_send:
+            MB_OKCANCEL       = 0x01
+            MB_ICONINFORMATION = 0x40
+            IDOK = 1
+            result = ctypes.windll.user32.MessageBoxW(
+                0,
+                "Mergermarket Newsletter wird in 60 Sekunden automatisch versendet.\n"
+                "Klicke Abbrechen um den Versand zu stoppen.",
+                "Mergermarket – Automatischer Versand",
+                MB_OKCANCEL | MB_ICONINFORMATION,
+            )
+            if result == IDOK:
+                log.info("Auto-send confirmed — waiting 60 s …")
+                time.sleep(60)
 
         # Get the embedded Word editor for the message body
         inspector = mail.GetInspector
@@ -1388,7 +1405,11 @@ def compose_outlook_email(
         word_selection.TypeParagraph()
         word_selection.TypeText(first_name)
 
-        log.info(f"Outlook email composed and displayed (signed as {first_name!r}).")
+        if auto_send and result == IDOK:
+            mail.Send()
+            log.info("Email sent automatically.")
+        else:
+            log.info(f"Email displayed for manual review (signed as {first_name!r}).")
 
     finally:
         source_doc.Close(SaveChanges=False)
@@ -1406,6 +1427,7 @@ def run(
     dry_run_xlsx: Optional[Path] = None,
     headless: bool = False,
     force_friday: bool = False,
+    auto_send: bool = False,
 ) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1443,7 +1465,8 @@ def run(
 
         # ── Step 4: Compose email ────────────────────────────────────────────
         compose_outlook_email(
-            output_docx, run_date, bka_data=bka_data, is_friday=is_friday
+            output_docx, run_date, bka_data=bka_data,
+            is_friday=is_friday, auto_send=auto_send,
         )
 
     except Exception as exc:
@@ -1453,34 +1476,6 @@ def run(
             f"The automation failed:\n{exc}\n\nFull log: {LOG_FILE}",
         )
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Scheduler  (optional — use --schedule flag or Windows Task Scheduler)
-# ---------------------------------------------------------------------------
-
-
-def start_scheduler(date_override: Optional[str] = None, headless: bool = False) -> None:
-    """Block forever, executing the pipeline on weekdays at 08:45."""
-    try:
-        import schedule
-    except ImportError:
-        show_error("Mergermarket – Missing dependency", "schedule is not installed.\nRun: pip install schedule")
-        sys.exit(1)
-
-    def _job() -> None:
-        today = date.today()
-        if today.weekday() >= 5:
-            log.info("Weekend — skipping scheduled run.")
-            return
-        log.info("=== Scheduled run triggered ===")
-        run(get_run_date(date_override), headless=headless)
-
-    schedule.every().day.at("08:45").do(_job)
-    log.info("Scheduler active — waiting for 08:45 on weekdays …  (Ctrl+C to stop)")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
 
 
 # ---------------------------------------------------------------------------
@@ -1504,11 +1499,6 @@ def main() -> None:
         help="Override today's date (e.g. for a Monday run covering the weekend).",
     )
     parser.add_argument(
-        "--schedule",
-        action="store_true",
-        help="Run as a background scheduler (Mon–Fri at 08:45).",
-    )
-    parser.add_argument(
         "--headless",
         action="store_true",
         help="Run the browser in headless mode (no visible window).",
@@ -1518,18 +1508,24 @@ def main() -> None:
         action="store_true",
         help="Force Friday mode: scrape Bundeskartellamt and use the extended email format.",
     )
+    parser.add_argument(
+        "--send",
+        action="store_true",
+        help=(
+            "After composing the email, show a 60-second confirmation dialog. "
+            "If confirmed, send automatically; otherwise open for manual review."
+        ),
+    )
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
     log.info(f"=== Mergermarket Newsletter  {run_date}  ({'Monday' if run_date.weekday() == 0 else run_date.strftime('%A')}) ===")
 
-    if args.schedule:
-        start_scheduler(date_override=args.date, headless=args.headless)
-    elif args.dry_run:
+    if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
-            force_friday=args.friday)
+            force_friday=args.friday, auto_send=args.send)
     else:
-        run(run_date, headless=args.headless, force_friday=args.friday)
+        run(run_date, headless=args.headless, force_friday=args.friday, auto_send=args.send)
 
 
 if __name__ == "__main__":
