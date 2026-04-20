@@ -105,6 +105,128 @@ def fmt_dmy(d: date) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ── Diagnostic helpers ───────────────────────────────────────────────────────
+
+def _dump_page_state(page, label: str) -> None:
+    """
+    Save a full-page screenshot and a JSON DOM dump to C:\\Temp\\mm_debug_<label>.*
+
+    Called automatically before every key interaction so that when a selector
+    fails, we have complete visibility into what was actually on the page.
+    Logs a human-readable summary of all selects / buttons / inputs / iframes.
+    """
+    import json as _json
+
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    base = TEMP_DIR / f"mm_debug_{label}"
+
+    # Screenshot (always from the top-level page object)
+    try:
+        page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+    except Exception as exc:
+        log.debug(f"Screenshot failed ({label}): {exc}")
+
+    # DOM dump (evaluate in whichever context was passed — page or frame)
+    try:
+        data = page.evaluate("""() => {
+            const selects = Array.from(document.querySelectorAll('select')).map(s => ({
+                name: s.name, id: s.id, multiple: s.multiple,
+                options: Array.from(s.options).slice(0, 30).map(o => o.text.trim())
+            }));
+            const buttons = Array.from(document.querySelectorAll(
+                'button, input[type="button"], input[type="submit"]'
+            )).map(b => ({
+                tag: b.tagName.toLowerCase(),
+                type: b.type || '',
+                id: b.id,
+                name: b.name || '',
+                value: (b.value || '').slice(0, 80),
+                text: (b.textContent || '').trim().slice(0, 80)
+            }));
+            const inputs = Array.from(document.querySelectorAll('input')).map(i => ({
+                type: i.type, name: i.name || '', id: i.id,
+                value: (i.value || '').slice(0, 60),
+                placeholder: i.placeholder || ''
+            }));
+            const iframes = Array.from(document.querySelectorAll('iframe')).map(f => ({
+                src: f.src, id: f.id, name: f.name
+            }));
+            return {
+                url: location.href, title: document.title,
+                selects, buttons, inputs, iframes
+            };
+        }""")
+
+        with open(str(base.with_suffix(".json")), "w", encoding="utf-8") as fh:
+            _json.dump(data, fh, indent=2, ensure_ascii=False)
+
+        log.info(
+            f"[DIAG {label}] {data['url'][:80]}  "
+            f"selects={len(data['selects'])}  "
+            f"buttons={len(data['buttons'])}  "
+            f"inputs={len(data['inputs'])}  "
+            f"iframes={len(data['iframes'])}"
+        )
+        log.info(f"  → screenshot: {base}.png")
+        log.info(f"  → DOM dump  : {base}.json")
+
+        # Print every select's options so selector issues are immediately visible
+        for s in data["selects"]:
+            log.info(f"  <select> name={s['name']!r} id={s['id']!r} "
+                     f"multiple={s['multiple']} options={s['options'][:6]}")
+
+        # Print every button
+        for b in data["buttons"]:
+            log.info(f"  <{b['tag']}> type={b['type']!r} "
+                     f"value={b['value']!r} text={b['text']!r} "
+                     f"id={b['id']!r} name={b['name']!r}")
+
+        # Warn about iframes — selectors won't work across frame boundaries
+        for f in data["iframes"]:
+            log.warning(f"  !! iframe detected: id={f['id']!r} src={f['src']!r}")
+
+    except Exception as exc:
+        log.debug(f"DOM dump failed ({label}): {exc}")
+
+
+def _find_form_context(page):
+    """
+    Return the Playwright context (Page or Frame) that contains the search form.
+
+    If the form lives inside an <iframe> — common in legacy enterprise apps —
+    selectors run against the main page document won't find anything.
+    This function checks every frame for <select> elements and returns the
+    first frame that has them.  Falls back to the main page.
+    """
+    # Check main document first
+    try:
+        n = page.evaluate("() => document.querySelectorAll('select').length")
+        if n > 0:
+            log.info(f"Form context: main page ({n} selects found)")
+            return page
+    except Exception:
+        pass
+
+    # Walk child frames
+    for frame in page.frames[1:]:
+        try:
+            n = frame.evaluate("() => document.querySelectorAll('select').length")
+            if n > 0:
+                log.info(f"Form context: iframe '{frame.url}' ({n} selects found)")
+                return frame
+        except Exception:
+            continue
+
+    log.warning(
+        "Form context: no <select> elements found anywhere on the page.\n"
+        "The page may still be loading, require a login, or use a non-standard layout.\n"
+        "Check the screenshot in C:\\Temp\\mm_debug_01_after_login.png"
+    )
+    return page  # best-effort fallback
+
+
+# ── Main download orchestration ──────────────────────────────────────────────
+
 def download_mergermarket_report(
     run_date: date,
     output_path: Path,
@@ -114,6 +236,9 @@ def download_mergermarket_report(
     """
     Navigate Mergermarket via Playwright, configure the search, and download
     the Unformatted Report Excel file to *output_path*.
+
+    Diagnostic screenshots + DOM dumps are saved to C:\\Temp\\mm_debug_*.{png,json}
+    at every key step so selector problems are immediately diagnosable.
     """
     try:
         from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
@@ -130,54 +255,81 @@ def download_mergermarket_report(
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
-        context = browser.new_context(accept_downloads=True)
-        page = context.new_page()
+        ctx_browser = browser.new_context(accept_downloads=True)
+        page = ctx_browser.new_page()
 
         log.info("Navigating to Mergermarket intelligence page …")
         try:
             page.goto(MERGERMARKET_URL, wait_until="networkidle", timeout=30_000)
         except PWTimeout:
+            _dump_page_state(page, "00_timeout")
             show_error("Mergermarket – Timeout", "Could not load the Mergermarket page within 30 s.")
             browser.close()
             raise
 
         _handle_login(page, mm_user, mm_pass)
 
-        # Wait for the search form
-        page.wait_for_selector("form", timeout=15_000)
+        # Wait for the search form, then take a diagnostic snapshot
+        try:
+            page.wait_for_selector("form", timeout=15_000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1_000)  # allow any late JS rendering to settle
+        _dump_page_state(page, "01_after_login")
 
+        # Determine whether the form lives in the main document or an iframe
+        ctx = _find_form_context(page)
+
+        # ── Date range ───────────────────────────────────────────────────────
         if date_from and date_to:
             log.info(f"Setting date range: {fmt_dmy(date_from)} – {fmt_dmy(date_to)}")
-            _set_date_range(page, date_from, date_to)
+            _set_date_range(ctx, date_from, date_to)
         else:
             log.info("Selecting 'Last 24 Hours' …")
-            _select_last_24h(page)
+            _select_last_24h(ctx)
 
+        # ── Geography ────────────────────────────────────────────────────────
         log.info("Selecting geographies: Austria, Germany, Switzerland …")
-        _select_geographies(page, GEOGRAPHIES)
+        _dump_page_state(page, "02_before_geography")
+        _select_geographies(ctx, GEOGRAPHIES)
 
-        # The page has two Search buttons (one mid-form, one at the very bottom
-        # after the Geography / Further Parameters section).  We always click
-        # the last one so geography selections are included in the query.
+        # ── Search (use the last Search button — after the Geography section) ─
         log.info("Submitting search …")
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(300)
-        search_btns = page.locator("input[value='Search']")
+        _dump_page_state(page, "03_before_search")
+        ctx.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        ctx.wait_for_timeout(300)
+
+        search_btns = ctx.locator("input[value='Search']")
         if search_btns.count() > 0:
             search_btns.last.scroll_into_view_if_needed()
             search_btns.last.click()
+            log.info(f"Clicked Search button ({search_btns.count()} found, used last)")
         else:
-            _try_click(page, ["button:text-is('Search')", "input[type='submit']"])
+            clicked = _try_click(ctx, [
+                "button:text-is('Search')",
+                "input[type='submit']",
+            ])
+            if not clicked:
+                _dump_page_state(page, "03b_search_not_found")
+                raise RuntimeError(
+                    "Search button not found. "
+                    f"See C:\\Temp\\mm_debug_03b_search_not_found.png"
+                )
+
         page.wait_for_load_state("networkidle", timeout=30_000)
 
+        # ── Download ─────────────────────────────────────────────────────────
         log.info("Initiating report download …")
-        downloaded = _trigger_download(page, output_path)
+        _dump_page_state(page, "04_results_page")
+        downloaded = _trigger_download(page, ctx, output_path)
         log.info(f"Report saved to: {downloaded}")
 
         browser.close()
 
     return output_path
 
+
+# ── Form-interaction helpers (accept Page or Frame as `ctx`) ─────────────────
 
 def _handle_login(page, username: str, password: str) -> None:
     """Submit login form if one is present on the page."""
@@ -203,7 +355,7 @@ def _handle_login(page, username: str, password: str) -> None:
     log.info("Login submitted.")
 
 
-def _set_date_range(page, date_from: date, date_to: date) -> None:
+def _set_date_range(ctx, date_from: date, date_to: date) -> None:
     """
     Activate the 'Date From / Date To' radio and fill in both text inputs.
 
@@ -213,8 +365,7 @@ def _set_date_range(page, date_from: date, date_to: date) -> None:
 
     The custom-date radio is the one whose siblings do NOT include a <select>.
     """
-    # Click the radio that activates the text inputs (not the one next to the dropdown)
-    page.evaluate("""() => {
+    ctx.evaluate("""() => {
         const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
         for (const r of radios) {
             let el = r.nextElementSibling;
@@ -227,19 +378,16 @@ def _set_date_range(page, date_from: date, date_to: date) -> None:
             if (!hasSelect) { r.click(); return; }
         }
     }""")
-    page.wait_for_timeout(400)
+    ctx.wait_for_timeout(400)
 
-    # Fill the two date text inputs.  Strategy: identify them by surrounding
-    # label text ('Date From' / 'Date To'); fall back to positional order.
-    page.evaluate(f"""() => {{
+    ctx.evaluate(f"""() => {{
         const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
-
         let fromEl = null, toEl = null;
         for (const inp of inputs) {{
-            const ctx = (inp.parentElement?.textContent ?? '') +
-                        (inp.parentElement?.parentElement?.textContent ?? '');
-            if (!fromEl && ctx.includes('Date From')) {{ fromEl = inp; continue; }}
-            if (!toEl   && ctx.includes('Date To'))   {{ toEl   = inp; continue; }}
+            const context = (inp.parentElement?.textContent ?? '') +
+                            (inp.parentElement?.parentElement?.textContent ?? '');
+            if (!fromEl && context.includes('Date From')) {{ fromEl = inp; continue; }}
+            if (!toEl   && context.includes('Date To'))   {{ toEl   = inp; continue; }}
         }}
         if (!fromEl && inputs[0]) fromEl = inputs[0];
         if (!toEl   && inputs[1]) toEl   = inputs[1];
@@ -256,14 +404,9 @@ def _set_date_range(page, date_from: date, date_to: date) -> None:
     log.info(f"Date range set: {fmt_dmy(date_from)} → {fmt_dmy(date_to)}")
 
 
-def _select_last_24h(page) -> None:
-    """
-    Click the 'Last 24 Hours' radio (the one whose siblings include a <select>).
-
-    The dropdown is typically already set to 'Last 24 Hours' by default, so
-    clicking the radio is usually sufficient.
-    """
-    page.evaluate("""() => {
+def _select_last_24h(ctx) -> None:
+    """Click the 'Last 24 Hours' radio (the one whose siblings include a <select>)."""
+    ctx.evaluate("""() => {
         const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
         for (const r of radios) {
             let el = r.nextElementSibling;
@@ -273,30 +416,21 @@ def _select_last_24h(page) -> None:
                 el = el.nextElementSibling;
             }
         }
-        // Fallback: first radio on the page is the Last 24 Hours radio
         if (radios[0]) radios[0].click();
     }""")
-    page.wait_for_timeout(300)
+    ctx.wait_for_timeout(300)
     log.info("Date mode set to 'Last 24 Hours'")
 
 
-def _select_geographies(page, countries: list[str]) -> None:
+def _select_geographies(ctx, countries: list[str]) -> None:
     """
-    Geography uses 4 cascading <select> elements (visible in the
-    'Further Search Parameters' section):
+    Geography uses 4 cascading <select> elements:
+      Col 1: Continent → Col 2: Sub-region → Col 3: Country
 
-      Col 1: Continent   (Africa / Americas / Asia / Europe / Middle East)
-           ↓ cascade
-      Col 2: Sub-region  (Western Europe / Northern Europe / …)
-           ↓ cascade
-      Col 3: Country     (Austria / Germany / Switzerland / …)
-      Col 4: (sub-area, unused)
-
-    We trigger each cascade level by setting option.selected and dispatching
-    a 'change' event — no name/id attributes required.
+    We trigger each level by setting option.selected and dispatching 'change'.
     """
-    # ── Step 1: select 'Europe' in the continent column ─────────────────────
-    ok1 = page.evaluate("""() => {
+    # Step 1 – select 'Europe' in the continent column
+    ok1 = ctx.evaluate("""() => {
         const sels = Array.from(document.querySelectorAll('select'));
         const s = sels.find(sel => {
             const opts = Array.from(sel.options).map(o => o.text.trim());
@@ -308,22 +442,25 @@ def _select_geographies(page, countries: list[str]) -> None:
         return true;
     }""")
     if not ok1:
-        log.warning("Geography: continent <select> not found — check page structure")
+        log.warning(
+            "Geography: continent <select> not found. "
+            "Check mm_debug_02_before_geography.json — the select with options "
+            "[Africa, Americas, Asia, Europe, Middle East] was not present."
+        )
         return
     log.info("Geography: continent 'Europe' selected")
 
-    # Wait for 'Western Europe' to appear in column 2
     try:
-        page.wait_for_function(
+        ctx.wait_for_function(
             "() => Array.from(document.querySelectorAll('select option'))"
             "       .some(o => o.text.trim() === 'Western Europe')",
             timeout=6_000,
         )
     except Exception:
-        page.wait_for_timeout(2_000)
+        ctx.wait_for_timeout(2_000)
 
-    # ── Step 2: select 'Western Europe' in the sub-region column ────────────
-    ok2 = page.evaluate("""() => {
+    # Step 2 – select 'Western Europe'
+    ok2 = ctx.evaluate("""() => {
         const sels = Array.from(document.querySelectorAll('select'));
         const s = sels.find(sel =>
             Array.from(sel.options).some(o => o.text.trim() === 'Western Europe')
@@ -334,22 +471,21 @@ def _select_geographies(page, countries: list[str]) -> None:
         return true;
     }""")
     if not ok2:
-        log.warning("Geography: sub-region <select> for 'Western Europe' not found after cascade")
+        log.warning("Geography: 'Western Europe' not found after cascading from Europe")
         return
     log.info("Geography: sub-region 'Western Europe' selected")
 
-    # Wait for country options to appear in column 3
     try:
-        page.wait_for_function(
-            f"() => Array.from(document.querySelectorAll('select option'))"
-            f"       .some(o => o.text.trim() === 'Germany')",
+        ctx.wait_for_function(
+            "() => Array.from(document.querySelectorAll('select option'))"
+            "       .some(o => o.text.trim() === 'Germany')",
             timeout=6_000,
         )
     except Exception:
-        page.wait_for_timeout(2_000)
+        ctx.wait_for_timeout(2_000)
 
-    # ── Step 3: multi-select the target countries ────────────────────────────
-    result = page.evaluate("""(targets) => {
+    # Step 3 – multi-select target countries
+    result = ctx.evaluate("""(targets) => {
         const sels = Array.from(document.querySelectorAll('select'));
         const s = sels.find(sel =>
             targets.some(c => Array.from(sel.options).some(o => o.text.trim() === c))
@@ -364,10 +500,7 @@ def _select_geographies(page, countries: list[str]) -> None:
     }""", countries)
 
     if not result.get("found"):
-        log.warning(
-            "Geography: country <select> not found after cascade. "
-            "Austria / Germany / Switzerland options were not available."
-        )
+        log.warning("Geography: country <select> not found — Austria/Germany/Switzerland absent")
     else:
         matched = result.get("matched", [])
         missing = [c for c in countries if c not in matched]
@@ -376,11 +509,11 @@ def _select_geographies(page, countries: list[str]) -> None:
             log.warning(f"Geography: options not found for {missing}")
 
 
-def _try_click(page, selectors: list[str]) -> bool:
+def _try_click(ctx, selectors: list[str]) -> bool:
     """Try each selector in order; click the first one found. Returns True on success."""
     for sel in selectors:
         try:
-            elem = page.query_selector(sel)
+            elem = ctx.query_selector(sel)
             if elem:
                 elem.click()
                 return True
@@ -390,68 +523,60 @@ def _try_click(page, selectors: list[str]) -> bool:
     return False
 
 
-def _trigger_download(page, output_path: Path):
+def _trigger_download(page, ctx, output_path: Path):
     """
     Click through the Mergermarket download flow:
       Search results → Download all → Unformatted Report → Download
       → Click here to view your report  (triggers the file download)
 
-    Screenshots are saved to TEMP_DIR\\mm_dl_*.png for debugging if a step
-    fails, without interrupting the run.
+    `page`  – top-level Page object (needed for expect_download + screenshots)
+    `ctx`   – Page or Frame that contains the result-page elements
     """
-    def _snap(name: str) -> None:
-        try:
-            page.screenshot(path=str(TEMP_DIR / f"mm_dl_{name}.png"), full_page=False)
-        except Exception:
-            pass
-
     # ── Download all ─────────────────────────────────────────────────────────
-    _snap("01_results")
-    clicked = _try_click(page, [
+    _dump_page_state(page, "04a_before_download_all")
+    clicked = _try_click(ctx, [
         "a:has-text('Download all')",
         "button:has-text('Download all')",
         "input[value='Download all']",
         "text=Download all",
     ])
     if not clicked:
-        log.error(
-            "Could not find 'Download all' button on the results page.\n"
-            f"Screenshot saved to {TEMP_DIR}\\mm_dl_01_results.png — "
-            "check whether the search returned any results."
+        raise RuntimeError(
+            "'Download all' button not found on the results page.\n"
+            "Check C:\\Temp\\mm_debug_04a_before_download_all.{png,json} — "
+            "did the search return any results?"
         )
-        raise RuntimeError("'Download all' button not found on results page")
     page.wait_for_load_state("networkidle", timeout=15_000)
-    _snap("02_download_options")
 
     # ── Select 'Unformatted Report' ──────────────────────────────────────────
-    _try_click(page, [
+    _dump_page_state(page, "04b_download_options")
+    _try_click(ctx, [
         "label:has-text('Unformatted Report')",
         "input[value='Unformatted Report']",
         "text=Unformatted Report",
     ])
 
     # ── Click Download ───────────────────────────────────────────────────────
-    _try_click(page, [
+    _try_click(ctx, [
         "input[value='Download']",
         "button:has-text('Download')",
         "a:has-text('Download')",
     ])
     page.wait_for_load_state("networkidle", timeout=15_000)
-    _snap("03_after_download_click")
 
-    # ── Click here to view your report → triggers the actual file download ───
+    # ── "Click here to view your report" triggers the actual file download ───
+    _dump_page_state(page, "04c_before_view_report")
     with page.expect_download(timeout=90_000) as dl_info:
-        clicked2 = _try_click(page, [
+        clicked2 = _try_click(ctx, [
             "text=Click here to view your report",
             "a:has-text('view your report')",
             "a:has-text('click here')",
         ])
         if not clicked2:
-            log.error(
+            raise RuntimeError(
                 "'Click here to view your report' link not found.\n"
-                f"Screenshot saved to {TEMP_DIR}\\mm_dl_03_after_download_click.png"
+                "Check C:\\Temp\\mm_debug_04c_before_view_report.{png,json}"
             )
-            raise RuntimeError("Download trigger link not found")
 
     download = dl_info.value
     download.save_as(str(output_path))
