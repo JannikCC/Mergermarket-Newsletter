@@ -1299,13 +1299,9 @@ def compose_outlook_email(
         raise RuntimeError(msg)
 
     log.info("Opening Word document via COM …")
-    try:
-        word_app = win32com.client.Dispatch("Word.Application")
-        word_app.Visible = False
-        source_doc = word_app.Documents.Open(doc_path_str, ReadOnly=True)
-    except Exception as exc:
-        show_error("Mergermarket – Word Error", f"Could not open the Word document:\n{exc}")
-        raise
+    word_app = win32com.client.Dispatch("Word.Application")
+    word_app.Visible = False
+    source_doc = word_app.Documents.Open(doc_path_str)
 
     try:
         mail = outlook.CreateItem(0)  # 0 = olMailItem
@@ -1430,8 +1426,7 @@ def compose_outlook_email(
 
     finally:
         source_doc.Close(SaveChanges=False)
-        if word_app.Documents.Count == 0:
-            word_app.Quit()
+        word_app.Quit()
 
 
 # ---------------------------------------------------------------------------
