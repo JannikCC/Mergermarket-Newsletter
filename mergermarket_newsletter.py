@@ -38,7 +38,7 @@ LOG_FILE = OUTPUT_DIR / "mergermarket_log.txt"
 SEPARATOR = "--------------------------"
 MERGERMARKET_URL = "https://www.mergermarket.com/intelligence/intelligence.asp"
 GEOGRAPHIES = ["Austria", "Germany", "Switzerland"]
-EMAIL_RECIPIENT = "CASE_Germany"
+EMAIL_RECIPIENT = "jannik.schmid@casecassiopea.com"
 EMAIL_INTRO = (
     "Guten Morgen,\n\n"
     "anbei ein aktueller Auszug aus Mergermarket.\n\n"
@@ -1312,9 +1312,8 @@ def compose_outlook_email(
         mail.Subject = subject
 
         # Add recipients and resolve against the address book
-        for addr in [EMAIL_RECIPIENT, "sonke.debuhr@casecassiopea.com"]:
-            r = mail.Recipients.Add(addr)
-            r.Resolve()
+        r = mail.Recipients.Add(EMAIL_RECIPIENT)
+        r.Resolve()
 
         # Display the email so the WordEditor becomes available for body edits.
         mail.Display()
