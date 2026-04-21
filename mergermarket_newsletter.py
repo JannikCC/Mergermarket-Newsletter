@@ -751,12 +751,14 @@ def _trigger_download(page, ctx, output_path: Path):
     _dump_page_state(page, "04a_before_download_all")
     clicked = (
         _try_click(ctx, [
-            "a:has-text('Download all')",
+            "text=Download All",
+            "text=Download all",
             "a:has-text('Download All')",
-            "button:has-text('Download all')",
+            "a:has-text('Download all')",
             "button:has-text('Download All')",
-            "input[value='Download all']",
+            "button:has-text('Download all')",
             "input[value='Download All']",
+            "input[value='Download all']",
         ])
         or _js_click_by_text(ctx, "download all")
     )
