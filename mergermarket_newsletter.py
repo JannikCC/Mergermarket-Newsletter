@@ -1224,8 +1224,108 @@ def generate_word_document(
 # ---------------------------------------------------------------------------
 
 
+def _build_email_html(
+    entries: list[str],
+    bka_data: list[dict] | None,
+    is_friday: bool,
+    first_name: str,
+) -> str:
+    """Build the complete email body as HTML from parsed report entries."""
+    import html as _html
+
+    def e(s: str) -> str:
+        return _html.escape(str(s))
+
+    # Split each entry into heading + body lines
+    reports: list[tuple[str, list[str]]] = []
+    for entry in entries:
+        lines = [ln.strip() for ln in entry.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        reports.append((lines[0], lines[1:]))
+
+    base_style = (
+        'style="font-family:Calibri,Arial,sans-serif;font-size:11pt;'
+        'margin:0 0 6px 0;"'
+    )
+    h2_style = (
+        'style="font-family:Aptos,Calibri,Arial,sans-serif;font-size:12pt;'
+        'font-weight:bold;color:#000000;margin:8px 0 4px 0;"'
+    )
+
+    parts: list[str] = [
+        '<!DOCTYPE html><html><head><meta charset="utf-8"></head>',
+        '<body style="font-family:Calibri,Arial,sans-serif;font-size:11pt;">',
+        '<div id="top">',
+    ]
+
+    # ── Intro ────────────────────────────────────────────────────────────────
+    parts.append(f'<p {base_style}>Guten Morgen,</p>')
+
+    if is_friday and bka_data:
+        parts.append(
+            f'<p {base_style}>anbei die laufenden Verfahren des Bundeskartellamts '
+            f'und ein aktueller Auszug aus Mergermarket.</p>'
+        )
+        parts.append(f'<p {base_style}><b>Bundeskartellamt:</b></p>')
+
+        _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen", "Produktbereich", "Abschluss"]
+        _BKA_KEYS    = ["datum", "aktenzeichen", "unternehmen", "produktbereich", "abschluss"]
+
+        parts.append(
+            '<table border="1" style="border-collapse:collapse;'
+            'font-family:Calibri,Arial,sans-serif;font-size:11pt;">'
+        )
+        parts.append('<tr>')
+        for h in _BKA_HEADERS:
+            parts.append(
+                f'<th style="background-color:#000068;color:#ffffff;'
+                f'padding:4px 8px;text-align:left;">{e(h)}</th>'
+            )
+        parts.append('</tr>')
+        for row in bka_data:
+            parts.append('<tr>')
+            for key in _BKA_KEYS:
+                extra = 'min-width:200px;' if key in ('unternehmen', 'produktbereich') else ''
+                parts.append(f'<td style="padding:4px 8px;{extra}">{e(row.get(key, ""))}</td>')
+            parts.append('</tr>')
+        parts.append('</table>')
+        parts.append(f'<p {base_style}>&nbsp;</p>')
+        parts.append(f'<p {base_style}><b>Mergermarket:</b></p>')
+    else:
+        parts.append(f'<p {base_style}>anbei ein aktueller Auszug aus Mergermarket.</p>')
+        parts.append(f'<p {base_style}><b>Mergermarket:</b></p>')
+
+    # ── TOC ──────────────────────────────────────────────────────────────────
+    parts.append('<ol style="margin:4px 0 12px 0;padding-left:24px;">')
+    for i, (heading, _) in enumerate(reports, 1):
+        parts.append(
+            f'<li style="margin:2px 0;">'
+            f'<a href="#report_{i}">{i}. {e(heading)}</a></li>'
+        )
+    parts.append('</ol>')
+
+    # ── Reports ───────────────────────────────────────────────────────────────
+    for i, (heading, body_lines) in enumerate(reports, 1):
+        parts.append('<hr style="border:none;border-top:1px solid #cccccc;margin:8px 0;">')
+        parts.append(f'<h2 id="report_{i}" {h2_style}>{i}. {e(heading)}</h2>')
+        for line in body_lines:
+            parts.append(f'<p {base_style}>{e(line)}</p>')
+        parts.append(
+            f'<p style="margin:4px 0;">'
+            f'<a href="#top" style="font-size:10pt;">&#x2191; Top</a></p>'
+        )
+
+    # ── Signature ─────────────────────────────────────────────────────────────
+    parts.append('<hr style="border:none;border-top:1px solid #cccccc;margin:8px 0;">')
+    parts.append(f'<p {base_style}>Beste Grüße<br>{e(first_name)}</p>')
+
+    parts.append('</div></body></html>')
+    return ''.join(parts)
+
+
 def compose_outlook_email(
-    word_doc_path: Path,
+    entries: list[str],
     run_date: date,
     *,
     bka_data: list[dict] | None = None,
@@ -1233,8 +1333,8 @@ def compose_outlook_email(
     auto_send: bool = False,
 ) -> None:
     """
-    Create a new Outlook MailItem, insert the intro text and the content of
-    the Word document, then display it so the user can review before sending.
+    Build the email body as HTML directly from parsed report entries and send
+    or display it via Outlook COM. No Word document is opened or attached.
     """
     try:
         import win32com.client
@@ -1252,10 +1352,7 @@ def compose_outlook_email(
         )
     else:
         subject = f"Mergermarket Newsletter - {run_date.strftime('%d.%m.%Y')}"
-    doc_path_str = str(word_doc_path.resolve())
 
-    # Detect whether any Outlook process (new olk.exe or classic OUTLOOK.EXE)
-    # is already running so we can skip the launch-and-wait cycle.
     import subprocess as _sp
     import glob as _glob
 
@@ -1266,10 +1363,9 @@ def compose_outlook_email(
         ).stdout.upper()
         outlook_running = "OLK.EXE" in tasklist_out or "OUTLOOK.EXE" in tasklist_out
     except Exception:
-        outlook_running = False  # can't tell — assume we need to start it
+        outlook_running = False
 
     if not outlook_running:
-        # Prefer new Outlook (olk.exe) over the classic Office installation.
         olk_candidates = _glob.glob(
             str(Path.home() / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "olk.exe")
         )
@@ -1298,135 +1394,29 @@ def compose_outlook_email(
         show_error("Mergermarket – Outlook Error", msg)
         raise RuntimeError(msg)
 
-    log.info("Opening Word document via COM …")
-    word_app = win32com.client.Dispatch("Word.Application")
-    word_app.Visible = False
-    source_doc = word_app.Documents.Open(doc_path_str)
-
+    # Resolve first name from Outlook session; fall back to Windows USERNAME
     try:
-        mail = outlook.CreateItem(0)  # 0 = olMailItem
-        mail.Subject = subject
+        display_name = outlook.Session.CurrentUser.Name
+        first_name = display_name.split()[0] if display_name else ""
+    except Exception:
+        first_name = ""
+    if not first_name:
+        win_user = os.environ.get("USERNAME", "")
+        raw = win_user.replace(".", " ").split()[0] if win_user else ""
+        first_name = raw.capitalize()
 
-        # Add recipients and resolve against the address book
-        r = mail.Recipients.Add(EMAIL_RECIPIENT)
-        r.Resolve()
+    mail = outlook.CreateItem(0)  # olMailItem
+    mail.Subject = subject
+    r = mail.Recipients.Add(EMAIL_RECIPIENT)
+    r.Resolve()
+    mail.HTMLBody = _build_email_html(entries, bka_data, is_friday, first_name)
 
-        # Display the email so the WordEditor becomes available for body edits.
+    if auto_send:
+        mail.Send()
+        log.info("Email sent automatically.")
+    else:
         mail.Display()
-
-        # Get the embedded Word editor for the message body
-        inspector = mail.GetInspector
-        mail_doc = inspector.WordEditor          # Word.Document COM object
-        word_selection = mail_doc.Application.Selection
-
-        # Resolve first name: prefer Outlook's current-user display name,
-        # fall back to the Windows USERNAME env var.
-        try:
-            display_name = outlook.Session.CurrentUser.Name
-            first_name = display_name.split()[0] if display_name else ""
-        except Exception:
-            first_name = ""
-        if not first_name:
-            win_user = os.environ.get("USERNAME", "")
-            raw = win_user.replace(".", " ").split()[0] if win_user else ""
-            first_name = raw.capitalize()
-
-        # ── Helper ────────────────────────────────────────────────────────────
-        def _bold(text: str) -> None:
-            word_selection.Font.Bold = True
-            word_selection.TypeText(text)
-            word_selection.Font.Bold = False
-
-        word_selection.HomeKey(Unit=6)  # wdStory = 6
-
-        if is_friday and bka_data:
-            # ── Friday intro ──────────────────────────────────────────────────
-            for line in FRIDAY_INTRO.splitlines():
-                word_selection.TypeText(line)
-                word_selection.TypeParagraph()
-            word_selection.TypeParagraph()  # blank line after intro sentence
-
-            # ── Bundeskartellamt section ──────────────────────────────────────
-            _bold("Bundeskartellamt:")
-            word_selection.TypeParagraph()
-            word_selection.TypeParagraph()  # blank line before table
-
-            _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
-                            "Produktbereich", "Abschluss"]
-            _BKA_KEYS    = ["datum", "aktenzeichen", "unternehmen",
-                            "produktbereich", "abschluss"]
-            tbl = mail_doc.Tables.Add(
-                Range=word_selection.Range,
-                NumRows=1 + len(bka_data),
-                NumColumns=len(_BKA_HEADERS),
-            )
-
-            # Header row: dark-blue background (#000068) with white text
-            # Word COM colors: int = R + G*256 + B*65536
-            _DARK_BLUE = 0x68 * 65536   # R=0 G=0 B=104 → #000068
-            _WHITE     = 0xFF + 0xFF * 256 + 0xFF * 65536
-            for j, h in enumerate(_BKA_HEADERS, 1):
-                cell = tbl.Cell(1, j)
-                cell.Range.Text = h
-                cell.Range.Font.Bold = True
-                cell.Range.Font.Color = _WHITE
-                cell.Shading.BackgroundPatternColor = _DARK_BLUE
-
-            # Data rows
-            for i, row in enumerate(bka_data, 2):
-                for j, key in enumerate(_BKA_KEYS, 1):
-                    tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
-
-            # Column widths: Unternehmen (col 3) and Produktbereich (col 4) → 550 px
-            _col_width_pt = mail_doc.Application.PixelsToPoints(550, False)
-            tbl.Columns(3).Width = _col_width_pt
-            tbl.Columns(4).Width = _col_width_pt
-
-            # Outside borders: solid black (#000000)
-            tbl.Borders.OutsideLineStyle = 1  # wdLineStyleSingle
-            tbl.Borders.OutsideColor = 0      # wdColorBlack
-
-            # Move cursor past the table
-            word_selection.EndKey(Unit=6)
-            word_selection.TypeParagraph()
-            word_selection.TypeParagraph()
-
-            # ── Mergermarket label ────────────────────────────────────────────
-            _bold("Mergermarket:")
-            word_selection.TypeParagraph()
-            word_selection.TypeParagraph()
-
-        else:
-            # ── Normal day intro ──────────────────────────────────────────────
-            for line in EMAIL_INTRO.splitlines():
-                if line == "Mergermarket:":
-                    _bold(line)
-                else:
-                    word_selection.TypeText(line)
-                word_selection.TypeParagraph()
-            word_selection.TypeParagraph()
-
-        # ── Paste Mergermarket report ─────────────────────────────────────────
-        source_doc.Content.Copy()
-        word_selection.EndKey(Unit=6)
-        word_selection.Paste()
-
-        # ── Closing signature ─────────────────────────────────────────────────
-        word_selection.EndKey(Unit=6)
-        word_selection.TypeParagraph()
-        word_selection.TypeText("Beste Grüße")
-        word_selection.TypeParagraph()
-        word_selection.TypeText(first_name)
-
-        if auto_send:
-            mail.Send()
-            log.info("Email sent automatically.")
-        else:
-            log.info(f"Email displayed for manual review (signed as {first_name!r}).")
-
-    finally:
-        source_doc.Close(SaveChanges=False)
-        word_app.Quit()
+        log.info(f"Email displayed for manual review (signed as {first_name!r}).")
 
 
 # ---------------------------------------------------------------------------
@@ -1477,7 +1467,7 @@ def run(
 
         # ── Step 4: Compose email ────────────────────────────────────────────
         compose_outlook_email(
-            output_docx, run_date, bka_data=bka_data,
+            entries, run_date, bka_data=bka_data,
             is_friday=is_friday, auto_send=auto_send,
         )
 
