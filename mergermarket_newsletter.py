@@ -1015,12 +1015,12 @@ def parse_excel_report(xlsx_path: Path) -> list[str]:
 
 
 def _add_hyperlink_to_top(paragraph) -> None:
-    """Append a '(Top)' hyperlink pointing to the _top bookmark."""
+    """Append a '(Top)' hyperlink pointing to the _DocTop bookmark at document start."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
     hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("w:anchor"), "_top")
+    hyperlink.set(qn("w:anchor"), "_DocTop")
     hyperlink.set(qn("w:history"), "1")
 
     r = OxmlElement("w:r")
@@ -1037,53 +1037,80 @@ def _add_hyperlink_to_top(paragraph) -> None:
     paragraph._p.append(hyperlink)
 
 
-def _insert_toc(document) -> None:
+def _add_heading_bookmark(paragraph, bookmark_name: str, bm_id: int) -> None:
+    """Wrap a heading paragraph in a named bookmark for reliable internal linking."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    p = paragraph._p
+    id_str = str(bm_id)
+
+    bm_start = OxmlElement("w:bookmarkStart")
+    bm_start.set(qn("w:id"), id_str)
+    bm_start.set(qn("w:name"), bookmark_name)
+
+    bm_end = OxmlElement("w:bookmarkEnd")
+    bm_end.set(qn("w:id"), id_str)
+
+    p.insert(0, bm_start)
+    p.append(bm_end)
+
+
+def _build_manual_toc(document, toc_entries: list[tuple[str, str]]) -> None:
     """
-    Insert a TOC field (Heading 1 only, hyperlinked, no page numbers) at the
-    very beginning of the document body.
+    Insert a manual, hyperlink-based table of contents at the document start.
+
+    Uses explicit bookmark names (_Report1, _Report2, …) rather than the
+    auto-generated _Toc<number> bookmarks produced by a TOC field.  Explicit
+    names survive copy-paste into Outlook because both the link href and the
+    anchor target receive the same x_ prefix and therefore still match.
+
+    A _DocTop bookmark is added on the very first paragraph so that (Top)
+    links inside the document have a valid jump target.
+
+    toc_entries: list of (bookmark_name, display_text)
     """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
     body = document.element.body
 
-    # TOC field paragraph only — no "Table of Contents" heading.
-    # Switches: \h = hyperlinks, \z = hide in web layout, \n = no page numbers,
-    #           \o "1-1" = include only Heading 1
-    field_p = OxmlElement("w:p")
-    field_r = OxmlElement("w:r")
+    # Paragraph that carries the _DocTop bookmark (ID 0, reserved for this)
+    doctop_p = OxmlElement("w:p")
+    bm_start = OxmlElement("w:bookmarkStart")
+    bm_start.set(qn("w:id"), "0")
+    bm_start.set(qn("w:name"), "_DocTop")
+    bm_end = OxmlElement("w:bookmarkEnd")
+    bm_end.set(qn("w:id"), "0")
+    doctop_p.append(bm_start)
+    doctop_p.append(bm_end)
+    body.insert(0, doctop_p)
 
-    begin = OxmlElement("w:fldChar")
-    begin.set(qn("w:fldCharType"), "begin")
-    field_r.append(begin)
+    # Insert TOC hyperlink paragraphs after the _DocTop paragraph.
+    # Inserting each at position 1 in reverse order produces final order:
+    #   [_DocTop_p, entry1_p, entry2_p, …, entryN_p, document content…]
+    for bookmark_name, display_text in reversed(toc_entries):
+        link_p = OxmlElement("w:p")
 
-    instr_r = OxmlElement("w:r")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = ' TOC \\h \\z \\n \\o "1-1" '
-    instr_r.append(instr)
+        hyperlink = OxmlElement("w:hyperlink")
+        hyperlink.set(qn("w:anchor"), bookmark_name)
+        hyperlink.set(qn("w:history"), "1")
 
-    sep_r = OxmlElement("w:r")
-    sep_char = OxmlElement("w:fldChar")
-    sep_char.set(qn("w:fldCharType"), "separate")
-    sep_r.append(sep_char)
-    placeholder_r = OxmlElement("w:r")
-    placeholder_t = OxmlElement("w:t")
-    placeholder_t.text = "[Right-click → Update Field to refresh this Table of Contents]"
-    placeholder_r.append(placeholder_t)
+        r = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        rStyle = OxmlElement("w:rStyle")
+        rStyle.set(qn("w:val"), "Hyperlink")
+        rPr.append(rStyle)
+        r.append(rPr)
 
-    end_r = OxmlElement("w:r")
-    end_char = OxmlElement("w:fldChar")
-    end_char.set(qn("w:fldCharType"), "end")
-    end_r.append(end_char)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = display_text
+        r.append(t)
+        hyperlink.append(r)
+        link_p.append(hyperlink)
 
-    field_p.append(field_r)
-    field_p.append(instr_r)
-    field_p.append(sep_r)
-    field_p.append(placeholder_r)
-    field_p.append(end_r)
-
-    body.insert(0, field_p)
+        body.insert(1, link_p)
 
 
 def _apply_heading_formatting(paragraph, font_name: str = "Aptos") -> None:
@@ -1137,6 +1164,7 @@ def generate_word_document(
         p._element.getparent().remove(p._element)
 
     report_count = 0
+    toc_entries: list[tuple[str, str]] = []  # (bookmark_name, display_text)
 
     for entry in entries:
         lines = [ln.strip() for ln in entry.splitlines() if ln.strip()]
@@ -1144,14 +1172,20 @@ def generate_word_document(
             continue
 
         report_count += 1
+        bookmark_name = f"_Report{report_count}"
+        display_text = f"{report_count}. {lines[0]}"
 
         # Separator line before each report
         doc.add_paragraph(SEPARATOR).style = "Normal"
 
-        # First line → Heading 1 (prefixed with report number for the TOC)
+        # First line → Heading 1 with an explicit named bookmark for TOC linking
         heading_para = doc.add_paragraph()
-        heading_para.add_run(f"{report_count}. {lines[0]}")
+        heading_para.add_run(display_text)
         _apply_heading_formatting(heading_para, font_name=heading_font)
+        # Bookmark IDs start at 1 (0 is reserved for _DocTop in _build_manual_toc)
+        _add_heading_bookmark(heading_para, bookmark_name, bm_id=report_count)
+
+        toc_entries.append((bookmark_name, display_text))
 
         # Remaining lines → Normal body text
         for line in lines[1:]:
@@ -1175,36 +1209,14 @@ def generate_word_document(
     # Trailing separator only — report count line intentionally omitted
     doc.add_paragraph(SEPARATOR).style = "Normal"
 
-    # Table of Contents at the very top
-    _insert_toc(doc)
+    # Manual TOC with explicit bookmarks — no Word field, no auto-refresh needed
+    _build_manual_toc(doc, toc_entries)
 
     doc.save(str(output_path))
     log.info(f"Word document saved: {output_path}  ({report_count} reports)")
 
-    _refresh_toc(output_path)
-
     return output_path
 
-
-def _refresh_toc(docx_path: Path) -> None:
-    """Open the saved .docx in Word via COM, update the TOC field, and save."""
-    try:
-        import win32com.client
-    except ImportError:
-        log.warning("pywin32 not available — TOC placeholder will remain; update manually.")
-        return
-    try:
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        doc = word.Documents.Open(str(docx_path.resolve()))
-        doc.TablesOfContents(1).Update()
-        doc.Save()
-        doc.Close()
-        if word.Documents.Count == 0:
-            word.Quit()
-        log.info("TOC updated and document re-saved.")
-    except Exception as exc:
-        log.warning(f"TOC auto-update failed ({exc}) — open the document and press Ctrl+A → F9.")
 
 
 # ---------------------------------------------------------------------------
