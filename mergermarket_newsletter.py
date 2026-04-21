@@ -751,14 +751,12 @@ def _trigger_download(page, ctx, output_path: Path):
     _dump_page_state(page, "04a_before_download_all")
     clicked = (
         _try_click(ctx, [
-            "text=Download All",
-            "text=Download all",
-            "a:has-text('Download All')",
             "a:has-text('Download all')",
-            "button:has-text('Download All')",
+            "a:has-text('Download All')",
             "button:has-text('Download all')",
-            "input[value='Download All']",
+            "button:has-text('Download All')",
             "input[value='Download all']",
+            "input[value='Download All']",
         ])
         or _js_click_by_text(ctx, "download all")
     )
@@ -1022,7 +1020,7 @@ def _add_hyperlink_to_top(paragraph) -> None:
     from docx.oxml.ns import qn
 
     hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("w:anchor"), "Top")
+    hyperlink.set(qn("w:anchor"), "_top")
     hyperlink.set(qn("w:history"), "1")
 
     r = OxmlElement("w:r")
@@ -1053,16 +1051,6 @@ def _insert_toc(document) -> None:
     # Switches: \h = hyperlinks, \z = hide in web layout, \n = no page numbers,
     #           \o "1-1" = include only Heading 1
     field_p = OxmlElement("w:p")
-
-    # "Top" bookmark at the very start so (Top) hyperlinks navigate here
-    bm_start = OxmlElement("w:bookmarkStart")
-    bm_start.set(qn("w:id"), "100")
-    bm_start.set(qn("w:name"), "Top")
-    bm_end = OxmlElement("w:bookmarkEnd")
-    bm_end.set(qn("w:id"), "100")
-    field_p.append(bm_start)
-    field_p.append(bm_end)
-
     field_r = OxmlElement("w:r")
 
     begin = OxmlElement("w:fldChar")
@@ -1302,7 +1290,7 @@ def compose_outlook_email(
     try:
         word_app = win32com.client.Dispatch("Word.Application")
         word_app.Visible = False
-        source_doc = word_app.Documents.Open(doc_path_str)
+        source_doc = word_app.Documents.Open(doc_path_str, ReadOnly=True)
     except Exception as exc:
         show_error("Mergermarket – Word Error", f"Could not open the Word document:\n{exc}")
         raise
@@ -1331,11 +1319,10 @@ def compose_outlook_email(
             first_name = display_name.split()[0] if display_name else ""
         except Exception:
             first_name = ""
-        # Guard: if primary gave only a single character (e.g. an initial),
-        # use the USERNAME env var (e.g. "jannik.schmid" → "Jannik")
-        if len(first_name) <= 1:
+        if not first_name:
             win_user = os.environ.get("USERNAME", "")
-            first_name = win_user.split('.')[0].capitalize() if win_user else first_name
+            raw = win_user.replace(".", " ").split()[0] if win_user else ""
+            first_name = raw.capitalize()
 
         # ── Helper ────────────────────────────────────────────────────────────
         def _bold(text: str) -> None:
@@ -1344,8 +1331,6 @@ def compose_outlook_email(
             word_selection.Font.Bold = False
 
         word_selection.HomeKey(Unit=6)  # wdStory = 6
-        word_selection.Font.Name = "Aptos"
-        word_selection.Font.Size = 12
 
         if is_friday and bka_data:
             # ── Friday intro ──────────────────────────────────────────────────
