@@ -1334,12 +1334,13 @@ def compose_outlook_email(
 
     def _add_hyperlink(sub_address: str, display_text: str) -> None:
         word_selection.EndKey(Unit=6)
-        r = word_selection.Range
+        start = word_selection.Range.Start
+        word_selection.TypeText(display_text)
+        end = word_selection.Range.Start
         mail_doc.Hyperlinks.Add(
-            Anchor=r,
+            Anchor=mail_doc.Range(start, end),
             Address="",
             SubAddress=sub_address,
-            TextToDisplay=display_text,
         )
         word_selection.EndKey(Unit=6)
 
@@ -1446,6 +1447,9 @@ def compose_outlook_email(
         # Heading 1 with bookmark _Toc{i}
         word_selection.EndKey(Unit=6)
         word_selection.Style = "Heading 1"
+        word_selection.Font.Name = "Aptos"
+        word_selection.Font.Size = 12
+        word_selection.Font.Bold = True
         start = word_selection.Range.Start
         word_selection.TypeText(f"{i}. {heading}")
         end = word_selection.Range.Start
