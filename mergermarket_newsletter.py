@@ -1448,15 +1448,17 @@ def compose_outlook_email(
         # Heading 1 with bookmark _Toc{i}
         word_selection.EndKey(Unit=6)
         word_selection.Style = "Heading 1"
-        word_selection.Font.Name = "Aptos"
-        word_selection.Font.Size = 12
-        word_selection.Font.Bold = True
         start = word_selection.Range.Start
         word_selection.TypeText(f"{i}. {heading}")
         end = word_selection.Range.Start
-        mail_doc.Bookmarks.Add(f"_Toc{i}", mail_doc.Range(start, end))
+        heading_range = mail_doc.Range(start, end)
+        heading_range.Font.Name = "Aptos"
+        heading_range.Font.Size = 12
+        heading_range.Font.Bold = True
+        mail_doc.Bookmarks.Add(f"_Toc{i}", heading_range)
         word_selection.TypeParagraph()
         word_selection.Style = "Normal"
+        word_selection.Font.Bold = False
         _body_font()
 
         # Body text
