@@ -1341,6 +1341,7 @@ def compose_outlook_email(
             Anchor=mail_doc.Range(start, end),
             Address="",
             SubAddress=sub_address,
+            TextToDisplay=display_text,
         )
         word_selection.EndKey(Unit=6)
 
