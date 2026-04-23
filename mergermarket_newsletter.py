@@ -1284,6 +1284,7 @@ def compose_outlook_email(
         tbl.Columns(4).Width = _col_width_pt
         tbl.Borders.OutsideLineStyle = 1
         tbl.Borders.OutsideColor = 0
+        tbl.Borders(3).LineStyle = 1  # wdBorderHorizontal: horizontal lines between rows
 
         word_selection.EndKey(Unit=6)
         word_selection.TypeParagraph()
