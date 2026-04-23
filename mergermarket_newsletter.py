@@ -1223,8 +1223,8 @@ def compose_outlook_email(
     mail_doc = inspector.WordEditor
     word_selection = mail_doc.Application.Selection
 
-    # Remove any auto-signature Outlook inserted so it doesn't appear in the
-    # middle of the email. We rebuild the full body from scratch.
+    # Save auto-signature before clearing body (will be re-appended at end)
+    sig_text = mail_doc.Range().Text.strip()
     mail_doc.Range().Delete()
 
     try:
@@ -1331,6 +1331,14 @@ def compose_outlook_email(
     word_selection.TypeText("Beste Grüße")
     word_selection.TypeParagraph()
     word_selection.TypeText(first_name)
+
+    # Re-append Outlook auto-signature at the very end
+    if sig_text:
+        word_selection.TypeParagraph()
+        word_selection.TypeParagraph()
+        for line in sig_text.splitlines():
+            word_selection.TypeText(line)
+            word_selection.TypeParagraph()
 
     if auto_send:
         mail.Send()
