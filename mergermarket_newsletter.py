@@ -1288,8 +1288,11 @@ def compose_outlook_email(
         tbl.Columns(4).Width = _col_width_pt
         tbl.Borders.OutsideLineStyle = 1
         tbl.Borders.OutsideColor = 0
-        tbl.Borders(3).LineStyle = 1  # wdBorderHorizontal
-        tbl.Borders(3).Color = 0
+        for _row_idx in range(1, tbl.Rows.Count + 1):
+            for _col_idx in range(1, tbl.Columns.Count + 1):
+                _cell = tbl.Cell(_row_idx, _col_idx)
+                _cell.Borders(3).LineStyle = 1  # bottom border per cell
+                _cell.Borders(3).Color = 0
 
         word_selection.EndKey(Unit=6)
         word_selection.TypeParagraph()
