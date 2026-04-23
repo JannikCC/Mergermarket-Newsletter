@@ -1223,6 +1223,10 @@ def compose_outlook_email(
     mail_doc = inspector.WordEditor
     word_selection = mail_doc.Application.Selection
 
+    # Remove any auto-signature Outlook inserted so it doesn't appear in the
+    # middle of the email. We rebuild the full body from scratch.
+    mail_doc.Range().Delete()
+
     try:
         display_name = outlook.Session.CurrentUser.Name
         first_name = display_name.split()[0] if display_name else ""
@@ -1284,7 +1288,8 @@ def compose_outlook_email(
         tbl.Columns(4).Width = _col_width_pt
         tbl.Borders.OutsideLineStyle = 1
         tbl.Borders.OutsideColor = 0
-        tbl.Borders(3).LineStyle = 1  # wdBorderHorizontal: horizontal lines between rows
+        tbl.Borders(3).LineStyle = 1  # wdBorderHorizontal
+        tbl.Borders(3).Color = 0
 
         word_selection.EndKey(Unit=6)
         word_selection.TypeParagraph()
@@ -1306,14 +1311,19 @@ def compose_outlook_email(
         _body_font()
 
     # ── Paste Word document content ───────────────────────────────────────
-    try:
-        source_doc.Content.Copy()
-        word_selection.EndKey(Unit=6)
-        word_selection.Paste()
-    finally:
-        source_doc.Close(SaveChanges=False)
-        if word_app.Documents.Count == 0:
-            word_app.Quit()
+    source_doc.Content.Copy()
+    word_selection.EndKey(Unit=6)
+    word_selection.Paste()
+
+    # Clear the clipboard so Word doesn't ask to keep large clipboard contents
+    import subprocess as _sub
+    _sub.run(
+        ["powershell", "-command", "Set-Clipboard -Value $null"],
+        capture_output=True,
+    )
+    source_doc.Close(SaveChanges=False)
+    if word_app.Documents.Count == 0:
+        word_app.Quit()
 
     # ── Closing signature ─────────────────────────────────────────────────
     word_selection.EndKey(Unit=6)
