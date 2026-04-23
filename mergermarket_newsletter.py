@@ -53,11 +53,6 @@ BKA_URL = (
     "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/"
     "LaufendeVerfahren/LaufendeVerfahren_Formular.html"
 )
-BKA_DEFAULT_AKTENZEICHEN = (
-    "B3-56/26,B3-55/26,B11-43/26,B3-54/26,B9-48/26,B1-67/26,"
-    "B2-27/26,B3-53/26,B11-44/26,B11-45/26,B7-34/26,B7-32/26,"
-    "B7-33/26,B4-38/26,B1-68/26"
-)
 
 # Boilerplate text patterns to skip when parsing the Excel report
 BOILERPLATE_PREFIXES = ("handelsblatt", "mergermarket", "---", "===")
@@ -353,7 +348,7 @@ def download_mergermarket_report(
         bka_data: list[dict] = []
         if is_friday:
             log.info("Friday run — scraping Bundeskartellamt …")
-            bka_data = scrape_bundeskartellamt(page, _get_bka_aktenzeichen())
+            bka_data = scrape_bundeskartellamt(page)
 
         browser.close()
 
@@ -843,58 +838,20 @@ def _trigger_download(page, ctx, output_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def _get_bka_aktenzeichen() -> list[str]:
-    raw = os.environ.get("BKA_AKTENZEICHEN", BKA_DEFAULT_AKTENZEICHEN)
-    return [az.strip() for az in raw.split(",") if az.strip()]
-
-
-def scrape_bundeskartellamt(page, aktenzeichen_list: list[str]) -> list[dict]:
+def scrape_bundeskartellamt(page) -> list[dict]:
     """
-    Load the BKA Laufende Verfahren page once, set the 'Zeige' dropdown to its
-    maximum value so all entries appear on a single page, parse the HTML table
-    (columns: Datum, Aktenzeichen, Unternehmen, Produktbereich, Abschluss),
-    and return only the rows whose Aktenzeichen matches aktenzeichen_list.
+    Load the BKA Laufende Verfahren page in its default view (first 15 entries)
+    and return the first 15 data rows without any Aktenzeichen filtering.
 
-    Rows not found in the table get a placeholder entry so the email table
-    stays complete.
+    Columns are positional: 0=Datum, 1=Aktenzeichen, 2=Unternehmen,
+    3=Produktbereich, 4=Abschluss.
     """
     log.info("BKA: loading Laufende Verfahren page …")
     page.goto(BKA_URL, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(1_500)
     _dump_page_state(page, "bka_01_initial")
 
-    # Set the 'Zeige' (page-size) dropdown to its highest option so that all
-    # entries load on a single page — avoids pagination handling.
-    changed = page.evaluate("""() => {
-        const selects = Array.from(document.querySelectorAll('select'));
-        const ps = selects.find(s =>
-            /anzahl|pagesize|zeige|perpage|rows/i.test(s.name + ' ' + s.id + ' ' +
-                (s.previousElementSibling?.textContent || ''))
-            || Array.from(s.options).some(o => ['10','25','50','100'].includes(o.value.trim()))
-        );
-        if (!ps) return false;
-        const opts = Array.from(ps.options).filter(o => parseInt(o.value) > 0);
-        if (!opts.length) return false;
-        const maxOpt = opts.reduce((a, b) => parseInt(b.value) > parseInt(a.value) ? b : a);
-        ps.value = maxOpt.value;
-        ps.dispatchEvent(new Event('change', {bubbles: true}));
-        return maxOpt.value;
-    }""")
-
-    if changed:
-        log.info(f"BKA: 'Zeige' dropdown set to {changed}")
-        try:
-            page.wait_for_load_state("networkidle", timeout=15_000)
-        except Exception:
-            page.wait_for_timeout(2_000)
-    else:
-        log.warning("BKA: 'Zeige' dropdown not found — using default page size")
-
-    _dump_page_state(page, "bka_02_full_list")
-
-    # Parse every <tr> with <td> cells from all tables on the page.
-    # Columns are positional: 0=Datum, 1=Aktenzeichen, 2=Unternehmen,
-    # 3=Produktbereich, 4=Abschluss (as stated by the user).
+    # Parse every <tr> with <td> cells — use the default page size (15 entries).
     all_rows: list[list[str]] = page.evaluate("""() =>
         Array.from(document.querySelectorAll('table tr'))
             .map(tr => Array.from(tr.querySelectorAll('td'))
@@ -902,42 +859,20 @@ def scrape_bundeskartellamt(page, aktenzeichen_list: list[str]) -> list[dict]:
             .filter(cells => cells.length >= 2)
     """)
 
-    log.info(f"BKA: {len(all_rows)} data rows found in page tables")
+    log.info(f"BKA: {len(all_rows)} data rows found; taking first 15")
 
-    # Build lookup: normalised AZ → row dict
-    az_set = {az.strip() for az in aktenzeichen_list}
-    found: dict[str, dict] = {}
-
-    for cells in all_rows:
-        az_cell = cells[1] if len(cells) > 1 else ""
-        az_norm = " ".join(az_cell.split())  # collapse whitespace
-        if az_norm in az_set:
-            found[az_norm] = {
-                "datum":          cells[0] if len(cells) > 0 else "",
-                "aktenzeichen":   az_norm,
-                "unternehmen":    cells[2] if len(cells) > 2 else "",
-                "produktbereich": cells[3] if len(cells) > 3 else "",
-                "abschluss":      cells[4] if len(cells) > 4 else "",
-            }
-
-    # Return rows in the original aktenzeichen_list order; add placeholders
-    # for any AZ that was not present in the table.
     results: list[dict] = []
-    for az in aktenzeichen_list:
-        az = az.strip()
-        if az in found:
-            results.append(found[az])
-        else:
-            log.warning(f"BKA: {az} not found in table")
-            results.append(_bka_empty(az, "—"))
+    for cells in all_rows[:15]:
+        results.append({
+            "datum":          cells[0] if len(cells) > 0 else "",
+            "aktenzeichen":   " ".join(cells[1].split()) if len(cells) > 1 else "",
+            "unternehmen":    cells[2] if len(cells) > 2 else "",
+            "produktbereich": cells[3] if len(cells) > 3 else "",
+            "abschluss":      cells[4] if len(cells) > 4 else "",
+        })
 
-    log.info(f"BKA: {len(found)}/{len(aktenzeichen_list)} Aktenzeichen matched")
+    log.info(f"BKA: returning {len(results)} rows")
     return results
-
-
-def _bka_empty(az: str, note: str) -> dict:
-    return {"datum": "", "aktenzeichen": az, "unternehmen": note,
-            "produktbereich": "—", "abschluss": "—"}
 
 
 # ---------------------------------------------------------------------------
