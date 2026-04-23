@@ -1036,63 +1036,38 @@ def _add_hyperlink_to_top(paragraph) -> None:
     paragraph._p.append(hyperlink)
 
 
-def _insert_toc(document) -> None:
-    """
-    Insert a TOC field (Heading 1 only, hyperlinked, no page numbers) at the
-    very beginning of the document body.
-    """
+def _add_bookmark(paragraph, bookmark_id: int, name: str) -> None:
+    """Wrap paragraph content in a named Word bookmark."""
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-
-    body = document.element.body
-
-    # TOC field paragraph only — no "Table of Contents" heading.
-    # Switches: \h = hyperlinks, \z = hide in web layout, \n = no page numbers,
-    #           \o "1-1" = include only Heading 1
-    field_p = OxmlElement("w:p")
-
-    # Bookmark "Top" at the very start so (Top) hyperlinks land here
+    p = paragraph._p
     bm_start = OxmlElement("w:bookmarkStart")
-    bm_start.set(qn("w:id"), "100")
-    bm_start.set(qn("w:name"), "Top")
+    bm_start.set(qn("w:id"), str(bookmark_id))
+    bm_start.set(qn("w:name"), name)
     bm_end = OxmlElement("w:bookmarkEnd")
-    bm_end.set(qn("w:id"), "100")
-    field_p.append(bm_start)
-    field_p.append(bm_end)
+    bm_end.set(qn("w:id"), str(bookmark_id))
+    p.insert(0, bm_start)
+    p.append(bm_end)
 
-    field_r = OxmlElement("w:r")
 
-    begin = OxmlElement("w:fldChar")
-    begin.set(qn("w:fldCharType"), "begin")
-    field_r.append(begin)
-
-    instr_r = OxmlElement("w:r")
-    instr = OxmlElement("w:instrText")
-    instr.set(qn("xml:space"), "preserve")
-    instr.text = ' TOC \\h \\z \\n \\o "1-1" '
-    instr_r.append(instr)
-
-    sep_r = OxmlElement("w:r")
-    sep_char = OxmlElement("w:fldChar")
-    sep_char.set(qn("w:fldCharType"), "separate")
-    sep_r.append(sep_char)
-    placeholder_r = OxmlElement("w:r")
-    placeholder_t = OxmlElement("w:t")
-    placeholder_t.text = "[Right-click → Update Field to refresh this Table of Contents]"
-    placeholder_r.append(placeholder_t)
-
-    end_r = OxmlElement("w:r")
-    end_char = OxmlElement("w:fldChar")
-    end_char.set(qn("w:fldCharType"), "end")
-    end_r.append(end_char)
-
-    field_p.append(field_r)
-    field_p.append(instr_r)
-    field_p.append(sep_r)
-    field_p.append(placeholder_r)
-    field_p.append(end_r)
-
-    body.insert(0, field_p)
+def _add_toc_hyperlink(paragraph, text: str, anchor: str) -> None:
+    """Insert a hyperlink into a paragraph pointing to an internal bookmark."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("w:anchor"), anchor)
+    hyperlink.set(qn("w:history"), "1")
+    r = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")
+    rPr.append(rStyle)
+    r.append(rPr)
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    hyperlink.append(r)
+    paragraph._p.append(hyperlink)
 
 
 def _apply_heading_formatting(paragraph, font_name: str = "Aptos") -> None:
@@ -1125,8 +1100,7 @@ def generate_word_document(
     """
     Build the formatted .docx from a list of report entry strings.
 
-    Each string in *entries* represents one intelligence report; its first
-    non-empty line becomes the Heading 1 and subsequent lines become body text.
+    Structure: Top bookmark → numbered TOC → separator/Heading/body/(Top) per report.
     """
     try:
         from docx import Document
@@ -1136,59 +1110,59 @@ def generate_word_document(
 
     log.info(f"Generating Word document: {output_path}")
 
-    # Prefer Aptos (Office 2024+); fall back to Calibri
-    heading_font = "Aptos"
-
     doc = Document()
-
-    # Remove the single empty paragraph that python-docx adds by default
     for p in list(doc.paragraphs):
         p._element.getparent().remove(p._element)
 
-    report_count = 0
-
+    # Parse entries into (heading, body_lines) pairs
+    parsed: list[tuple[str, list[str]]] = []
     for entry in entries:
         lines = [ln.strip() for ln in entry.splitlines() if ln.strip()]
         if not lines:
             continue
+        parsed.append((lines[0], [ln for ln in lines[1:] if ln.strip() != "(Top)"]))
 
-        report_count += 1
-
-        # Separator line before each report
-        doc.add_paragraph(SEPARATOR).style = "Normal"
-
-        # First line → Heading 1 (prefixed with report number for the TOC)
-        heading_para = doc.add_paragraph()
-        heading_para.add_run(f"{report_count}. {lines[0]}")
-        _apply_heading_formatting(heading_para, font_name=heading_font)
-
-        # Remaining lines → Normal body text
-        for line in lines[1:]:
-            # Skip any "(Top)" the raw data might already contain
-            if line.strip() == "(Top)":
-                continue
-            doc.add_paragraph(line).style = "Normal"
-
-        # (Top) hyperlink at the end of each report
-        top_para = doc.add_paragraph()
-        top_para.style = "Normal"
-        _add_hyperlink_to_top(top_para)
-
-    if report_count == 0:
+    if not parsed:
         log.warning("No report entries — the Word document will be empty.")
         show_error(
             "Mergermarket – No Reports",
             "No intelligence reports were found for today.\nCheck the downloaded Excel file.",
         )
 
-    # Trailing separator only — report count line intentionally omitted
+    # ── Top bookmark (before TOC so (Top) links land at document start) ──────
+    top_para = doc.add_paragraph()
+    top_para.style = "Normal"
+    _add_bookmark(top_para, bookmark_id=0, name="Top")
+
+    # ── Numbered TOC: one hyperlink per report → _Toc_{i} ────────────────────
+    for i, (heading, _) in enumerate(parsed, 1):
+        toc_para = doc.add_paragraph()
+        toc_para.style = "Normal"
+        _add_toc_hyperlink(toc_para, f"{i}. {heading}", anchor=f"_Toc_{i}")
+
+    doc.add_paragraph().style = "Normal"  # blank line after TOC
+
+    # ── Reports ───────────────────────────────────────────────────────────────
+    for i, (heading, body_lines) in enumerate(parsed, 1):
+        doc.add_paragraph(SEPARATOR).style = "Normal"
+
+        # Heading 1 in Aptos 12pt Bold with bookmark _Toc_{i}
+        heading_para = doc.add_paragraph()
+        heading_para.add_run(f"{i}. {heading}")
+        _apply_heading_formatting(heading_para, font_name="Aptos")
+        _add_bookmark(heading_para, bookmark_id=i, name=f"_Toc_{i}")
+
+        for line in body_lines:
+            doc.add_paragraph(line).style = "Normal"
+
+        top_link_para = doc.add_paragraph()
+        top_link_para.style = "Normal"
+        _add_hyperlink_to_top(top_link_para)
+
     doc.add_paragraph(SEPARATOR).style = "Normal"
 
-    # Table of Contents at the very top
-    _insert_toc(doc)
-
     doc.save(str(output_path))
-    log.info(f"Word document saved: {output_path}  ({report_count} reports)")
+    log.info(f"Word document saved: {output_path}  ({len(parsed)} reports)")
 
     _refresh_toc(output_path)
 
@@ -1222,7 +1196,7 @@ def _refresh_toc(docx_path: Path) -> None:
 
 
 def compose_outlook_email(
-    entries: list[str],
+    word_doc_path: Path,
     run_date: date,
     *,
     bka_data: list[dict] | None = None,
@@ -1230,8 +1204,8 @@ def compose_outlook_email(
     auto_send: bool = False,
 ) -> None:
     """
-    Create a new Outlook MailItem and build the full body directly in the
-    embedded Word editor — TOC hyperlinks, Heading 1 bookmarks, (Top) links.
+    Create an Outlook MailItem with intro text, the finished Word document as
+    an attachment, and a closing signature. No TOC or bookmarks in the email.
     """
     try:
         import win32com.client
@@ -1250,8 +1224,6 @@ def compose_outlook_email(
     else:
         subject = f"Mergermarket Newsletter - {run_date.strftime('%d.%m.%Y')}"
 
-    # Detect whether any Outlook process (new olk.exe or classic OUTLOOK.EXE)
-    # is already running so we can skip the launch-and-wait cycle.
     import subprocess as _sp
     import glob as _glob
 
@@ -1262,10 +1234,9 @@ def compose_outlook_email(
         ).stdout.upper()
         outlook_running = "OLK.EXE" in tasklist_out or "OUTLOOK.EXE" in tasklist_out
     except Exception:
-        outlook_running = False  # can't tell — assume we need to start it
+        outlook_running = False
 
     if not outlook_running:
-        # Prefer new Outlook (olk.exe) over the classic Office installation.
         olk_candidates = _glob.glob(
             str(Path.home() / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "olk.exe")
         )
@@ -1297,21 +1268,19 @@ def compose_outlook_email(
     mail = outlook.CreateItem(0)  # 0 = olMailItem
     mail.Subject = subject
 
-    # Add recipients and resolve against the address book
     for addr in [EMAIL_RECIPIENT, "sonke.debuhr@casecassiopea.com"]:
         r = mail.Recipients.Add(addr)
         r.Resolve()
 
-    # Display the email so the WordEditor becomes available for body edits.
+    # Attach the finished Word document
+    mail.Attachments.Add(str(word_doc_path.resolve()))
+
     mail.Display()
 
-    # Get the embedded Word editor for the message body
     inspector = mail.GetInspector
-    mail_doc = inspector.WordEditor          # Word.Document COM object
+    mail_doc = inspector.WordEditor
     word_selection = mail_doc.Application.Selection
 
-    # Resolve first name: prefer Outlook's current-user display name,
-    # fall back to the Windows USERNAME env var.
     try:
         display_name = outlook.Session.CurrentUser.Name
         first_name = display_name.split()[0] if display_name else ""
@@ -1321,7 +1290,6 @@ def compose_outlook_email(
         win_user = os.environ.get("USERNAME", "")
         first_name = win_user.split(".")[0].capitalize() if win_user else first_name
 
-    # ── Helpers ───────────────────────────────────────────────────────────
     def _body_font() -> None:
         word_selection.Font.Name = "Aptos"
         word_selection.Font.Size = 12
@@ -1332,44 +1300,19 @@ def compose_outlook_email(
         word_selection.TypeText(text)
         word_selection.Font.Bold = False
 
-    def _add_hyperlink(sub_address: str, display_text: str) -> None:
-        word_selection.EndKey(Unit=6)
-        start = word_selection.Range.Start
-        word_selection.TypeText(display_text)
-        end = word_selection.Range.Start
-        mail_doc.Hyperlinks.Add(
-            Anchor=mail_doc.Range(start, end),
-            Address="",
-            SubAddress=sub_address,
-            TextToDisplay=display_text,
-        )
-        word_selection.EndKey(Unit=6)
-
-    # ── Parse entries into (heading, body_lines) pairs ────────────────────
-    parsed: list[tuple[str, list[str]]] = []
-    for entry in entries:
-        lines = [ln.strip() for ln in entry.splitlines() if ln.strip()]
-        if not lines:
-            continue
-        parsed.append((lines[0], [ln for ln in lines[1:] if ln.strip() != "(Top)"]))
-
-    # ── Position at start, set base font, anchor _top bookmark ────────────
     word_selection.HomeKey(Unit=6)  # wdStory = 6
     _body_font()
-    doc_start = word_selection.Range.Start
-    mail_doc.Bookmarks.Add("_top", mail_doc.Range(doc_start, doc_start))
 
     if is_friday and bka_data:
         # ── Friday intro ──────────────────────────────────────────────────
         for line in FRIDAY_INTRO.splitlines():
             word_selection.TypeText(line)
             word_selection.TypeParagraph()
-        word_selection.TypeParagraph()  # blank line after intro sentence
+        word_selection.TypeParagraph()
 
-        # ── Bundeskartellamt section ──────────────────────────────────────
         _bold("Bundeskartellamt:")
         word_selection.TypeParagraph()
-        word_selection.TypeParagraph()  # blank line before table
+        word_selection.TypeParagraph()
 
         _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
                         "Produktbereich", "Abschluss"]
@@ -1381,9 +1324,7 @@ def compose_outlook_email(
             NumColumns=len(_BKA_HEADERS),
         )
 
-        # Header row: dark-blue background (#000068) with white text
-        # Word COM colors: int = R + G*256 + B*65536
-        _DARK_BLUE = 0x68 * 65536   # R=0 G=0 B=104 → #000068
+        _DARK_BLUE = 0x68 * 65536
         _WHITE     = 0xFF + 0xFF * 256 + 0xFF * 65536
         for j, h in enumerate(_BKA_HEADERS, 1):
             cell = tbl.Cell(1, j)
@@ -1392,29 +1333,22 @@ def compose_outlook_email(
             cell.Range.Font.Color = _WHITE
             cell.Shading.BackgroundPatternColor = _DARK_BLUE
 
-        # Data rows
         for i, row in enumerate(bka_data, 2):
             for j, key in enumerate(_BKA_KEYS, 1):
                 tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
 
-        # Column widths: Unternehmen (col 3) and Produktbereich (col 4) → 550 px
         _col_width_pt = mail_doc.Application.PixelsToPoints(550, False)
         tbl.Columns(3).Width = _col_width_pt
         tbl.Columns(4).Width = _col_width_pt
+        tbl.Borders.OutsideLineStyle = 1
+        tbl.Borders.OutsideColor = 0
 
-        # Outside borders: solid black (#000000)
-        tbl.Borders.OutsideLineStyle = 1  # wdLineStyleSingle
-        tbl.Borders.OutsideColor = 0      # wdColorBlack
-
-        # Move cursor past the table
         word_selection.EndKey(Unit=6)
         word_selection.TypeParagraph()
         word_selection.TypeParagraph()
         _body_font()
 
-        # ── Mergermarket label ────────────────────────────────────────────
         _bold("Mergermarket:")
-        word_selection.TypeParagraph()
         word_selection.TypeParagraph()
         _body_font()
 
@@ -1426,55 +1360,7 @@ def compose_outlook_email(
             else:
                 word_selection.TypeText(line)
             word_selection.TypeParagraph()
-        word_selection.TypeParagraph()
         _body_font()
-
-    # ── TOC: one hyperlink per report ─────────────────────────────────────
-    for i, (heading, _) in enumerate(parsed, 1):
-        _add_hyperlink(f"_Toc{i}", f"{i}. {heading}")
-        word_selection.TypeParagraph()
-        _body_font()
-
-    word_selection.EndKey(Unit=6)
-    word_selection.TypeParagraph()
-    _body_font()
-
-    # ── Reports ───────────────────────────────────────────────────────────
-    for i, (heading, body_lines) in enumerate(parsed, 1):
-        word_selection.EndKey(Unit=6)
-        word_selection.TypeText(SEPARATOR)
-        word_selection.TypeParagraph()
-
-        # Heading 1 with bookmark _Toc{i}
-        word_selection.EndKey(Unit=6)
-        word_selection.Style = "Heading 1"
-        start = word_selection.Range.Start
-        word_selection.TypeText(f"{i}. {heading}")
-        end = word_selection.Range.Start
-        heading_range = mail_doc.Range(start, end)
-        heading_range.Font.Name = "Aptos"
-        heading_range.Font.Size = 12
-        heading_range.Font.Bold = True
-        mail_doc.Bookmarks.Add(f"_Toc{i}", heading_range)
-        word_selection.TypeParagraph()
-        word_selection.Style = "Normal"
-        word_selection.Font.Bold = False
-        _body_font()
-
-        # Body text
-        for line in body_lines:
-            word_selection.TypeText(line)
-            word_selection.TypeParagraph()
-
-        # (Top) hyperlink
-        _add_hyperlink("_top", "(Top)")
-        word_selection.TypeParagraph()
-        _body_font()
-
-    # ── Trailing separator ────────────────────────────────────────────────
-    word_selection.EndKey(Unit=6)
-    word_selection.TypeText(SEPARATOR)
-    word_selection.TypeParagraph()
 
     # ── Closing signature ─────────────────────────────────────────────────
     word_selection.EndKey(Unit=6)
@@ -1538,7 +1424,7 @@ def run(
 
         # ── Step 4: Compose email ────────────────────────────────────────────
         compose_outlook_email(
-            entries, run_date, bka_data=bka_data,
+            output_docx, run_date, bka_data=bka_data,
             is_friday=is_friday, auto_send=auto_send,
         )
 
