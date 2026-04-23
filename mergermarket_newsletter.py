@@ -1204,8 +1204,8 @@ def compose_outlook_email(
     auto_send: bool = False,
 ) -> None:
     """
-    Create an Outlook MailItem with intro text, the finished Word document as
-    an attachment, and a closing signature. No TOC or bookmarks in the email.
+    Create an Outlook MailItem with intro text, the Word document content
+    pasted directly into the email body, and a closing signature.
     """
     try:
         import win32com.client
@@ -1272,8 +1272,15 @@ def compose_outlook_email(
         r = mail.Recipients.Add(addr)
         r.Resolve()
 
-    # Attach the finished Word document
-    mail.Attachments.Add(str(word_doc_path.resolve()))
+    # Open the Word document via COM to copy its content later
+    log.info("Opening Word document via COM …")
+    try:
+        word_app = win32com.client.Dispatch("Word.Application")
+        word_app.Visible = False
+        source_doc = word_app.Documents.Open(str(word_doc_path.resolve()))
+    except Exception as exc:
+        show_error("Mergermarket – Word Error", f"Could not open the Word document:\n{exc}")
+        raise
 
     mail.Display()
 
@@ -1361,6 +1368,16 @@ def compose_outlook_email(
                 word_selection.TypeText(line)
             word_selection.TypeParagraph()
         _body_font()
+
+    # ── Paste Word document content ───────────────────────────────────────
+    try:
+        source_doc.Content.Copy()
+        word_selection.EndKey(Unit=6)
+        word_selection.Paste()
+    finally:
+        source_doc.Close(SaveChanges=False)
+        if word_app.Documents.Count == 0:
+            word_app.Quit()
 
     # ── Closing signature ─────────────────────────────────────────────────
     word_selection.EndKey(Unit=6)
