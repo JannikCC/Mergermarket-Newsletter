@@ -103,10 +103,56 @@ def get_run_date(override: Optional[str] = None) -> date:
     return date.today()
 
 
-def get_date_range(run_date: date) -> tuple[Optional[date], Optional[date]]:
-    """Return (date_from, date_to) for Monday; (None, None) for Tue–Fri."""
-    if run_date.weekday() == 0:  # Monday
-        return run_date - timedelta(days=3), run_date  # Friday → Monday
+def _last_working_day(d: date, hols) -> date:
+    """Step d backwards until a non-weekend, non-holiday workday is found."""
+    while d.weekday() >= 5 or d in hols:
+        d -= timedelta(days=1)
+    return d
+
+
+def get_date_range(
+    run_date: date,
+    hours: int | None = None,
+) -> tuple[Optional[date], Optional[date]]:
+    """Return (date_from, date_to) with German/Hessian holiday awareness.
+
+    --hours X  → last X hours (overrides weekday logic)
+    Monday     → last Friday (or earlier if holiday) through Monday
+    Tuesday after holiday Monday → same range as Monday, shifted one day
+    Tue–Fri    → None/None (Last 24 Hours), unless yesterday was a holiday
+                  in which case date_from is set to the last working day
+    """
+    try:
+        import holidays as _hols
+        hols = _hols.country_holidays(
+            "DE", subdiv="HE",
+            years=range(run_date.year - 1, run_date.year + 2),
+        )
+    except ImportError:
+        log.warning("'holidays' package not installed — holiday awareness disabled.")
+        hols = {}
+
+    if hours is not None:
+        from datetime import datetime as _dt
+        date_from = (_dt.now() - timedelta(hours=hours)).date()
+        return date_from, run_date
+
+    weekday = run_date.weekday()  # 0=Mon … 6=Sun
+
+    if weekday == 0:  # Monday
+        date_from = _last_working_day(run_date - timedelta(days=3), hols)
+        return date_from, run_date
+
+    if weekday == 1 and (run_date - timedelta(days=1)) in hols:
+        # Tuesday after a holiday Monday → extended range like Monday
+        date_from = _last_working_day(run_date - timedelta(days=4), hols)
+        return date_from, run_date
+
+    # Tue–Fri: default Last 24 Hours, but extend if yesterday was a holiday
+    yesterday = run_date - timedelta(days=1)
+    last_wd = _last_working_day(yesterday, hols)
+    if last_wd != yesterday:
+        return last_wd, run_date
     return None, None
 
 
@@ -248,6 +294,7 @@ def download_mergermarket_report(
     *,
     headless: bool = False,
     is_friday: bool = False,
+    hours: int | None = None,
 ) -> tuple[Path, list[dict]]:
     """
     Navigate Mergermarket via Playwright, configure the search, and download
@@ -267,7 +314,7 @@ def download_mergermarket_report(
 
     mm_user = os.environ.get("MM_USERNAME", "")
     mm_pass = os.environ.get("MM_PASSWORD", "")
-    date_from, date_to = get_date_range(run_date)
+    date_from, date_to = get_date_range(run_date, hours=hours)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -1361,6 +1408,7 @@ def run(
     headless: bool = False,
     force_friday: bool = False,
     auto_send: bool = False,
+    hours: int | None = None,
 ) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1381,7 +1429,7 @@ def run(
             log.info(f"[DRY-RUN] Skipping browser download; using: {raw_xlsx}")
         else:
             raw_xlsx, bka_data = download_mergermarket_report(
-                run_date, raw_xlsx, headless=headless, is_friday=is_friday
+                run_date, raw_xlsx, headless=headless, is_friday=is_friday, hours=hours
             )
 
         # ── Step 2: Parse ────────────────────────────────────────────────────
@@ -1446,6 +1494,12 @@ def main() -> None:
         action="store_true",
         help="Send the email automatically via mail.Send(). Without this flag the email is only displayed for manual review.",
     )
+    parser.add_argument(
+        "--hours",
+        type=int,
+        metavar="N",
+        help="Override date range: use the last N hours instead of the weekday-based logic.",
+    )
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
@@ -1453,9 +1507,10 @@ def main() -> None:
 
     if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
-            force_friday=args.friday, auto_send=args.send)
+            force_friday=args.friday, auto_send=args.send, hours=args.hours)
     else:
-        run(run_date, headless=args.headless, force_friday=args.friday, auto_send=args.send)
+        run(run_date, headless=args.headless, force_friday=args.friday,
+            auto_send=args.send, hours=args.hours)
 
 
 if __name__ == "__main__":
