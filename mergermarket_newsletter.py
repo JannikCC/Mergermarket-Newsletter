@@ -1270,9 +1270,8 @@ def compose_outlook_email(
     mail_doc = inspector.WordEditor
     word_selection = mail_doc.Application.Selection
 
-    # Save auto-signature before clearing body (will be re-appended at end)
-    sig_text = mail_doc.Range().Text.strip()
-    mail_doc.Range().Delete()
+    # Do NOT clear the body — new content is inserted at document start
+    # (HomeKey below), so the auto-signature stays at the end automatically.
 
     try:
         display_name = outlook.Session.CurrentUser.Name
@@ -1341,7 +1340,8 @@ def compose_outlook_email(
                 _cell.Borders(3).LineStyle = 1  # bottom border per cell
                 _cell.Borders(3).Color = 0
 
-        word_selection.EndKey(Unit=6)
+        # Position cursor right after the table (not at doc end, so sig stays at end)
+        mail_doc.Range(tbl.Range.End, tbl.Range.End).Select()
         word_selection.TypeParagraph()
         word_selection.TypeParagraph()
         _body_font()
@@ -1362,8 +1362,8 @@ def compose_outlook_email(
 
     # ── Paste Word document content ───────────────────────────────────────
     source_doc.Content.Copy()
-    word_selection.EndKey(Unit=6)
     word_selection.Paste()
+    word_selection.Collapse(Direction=0)  # collapse to end of pasted content
 
     # Clear the clipboard so Word doesn't ask to keep large clipboard contents
     import subprocess as _sub
@@ -1376,19 +1376,13 @@ def compose_outlook_email(
         word_app.Quit()
 
     # ── Closing signature ─────────────────────────────────────────────────
-    word_selection.EndKey(Unit=6)
+    # No EndKey(Unit=6) here — cursor is already after pasted content and
+    # before the auto-signature, which remains at the document end.
     word_selection.TypeParagraph()
     word_selection.TypeText("Beste Grüße")
     word_selection.TypeParagraph()
     word_selection.TypeText(first_name)
-
-    # Re-append Outlook auto-signature at the very end
-    if sig_text:
-        word_selection.TypeParagraph()
-        word_selection.TypeParagraph()
-        for line in sig_text.splitlines():
-            word_selection.TypeText(line)
-            word_selection.TypeParagraph()
+    word_selection.TypeParagraph()
 
     if auto_send:
         mail.Send()
