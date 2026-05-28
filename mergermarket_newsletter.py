@@ -1108,6 +1108,12 @@ def generate_word_document(
     for p in list(doc.paragraphs):
         p._element.getparent().remove(p._element)
 
+    # Set Aptos 12pt as the default for all Normal-style paragraphs
+    from docx.shared import Pt
+    normal_style = doc.styles["Normal"]
+    normal_style.font.name = "Aptos"
+    normal_style.font.size = Pt(12)
+
     # Parse entries into (heading, body_lines) pairs
     parsed: list[tuple[str, list[str]]] = []
     for entry in entries:
@@ -1132,6 +1138,7 @@ def generate_word_document(
     for i, (heading, _) in enumerate(parsed, 1):
         toc_para = doc.add_paragraph()
         toc_para.style = "Normal"
+        toc_para.paragraph_format.space_after = Pt(5)
         _add_toc_hyperlink(toc_para, f"{i}. {heading}", anchor=f"_Toc_{i}")
 
     doc.add_paragraph().style = "Normal"  # blank line after TOC
@@ -1262,9 +1269,8 @@ def compose_outlook_email(
     mail = outlook.CreateItem(0)  # 0 = olMailItem
     mail.Subject = subject
 
-    for addr in [EMAIL_RECIPIENT, "sonke.debuhr@casecassiopea.com"]:
-        r = mail.Recipients.Add(addr)
-        r.Resolve()
+    r = mail.Recipients.Add(EMAIL_RECIPIENT)
+    r.Resolve()
 
     # Open the Word document via COM to copy its content later
     log.info("Opening Word document via COM …")
@@ -1294,90 +1300,163 @@ def compose_outlook_email(
         win_user = os.environ.get("USERNAME", "")
         first_name = win_user.split(".")[0].capitalize() if win_user else first_name
 
-    def _body_font() -> None:
-        word_selection.Font.Name = "Aptos"
-        word_selection.Font.Size = 12
-        word_selection.Font.Bold = False
+    def _build_body_content(m_doc, m_sel) -> None:
+        """Build the full email body in the given WordEditor."""
+        def _bf() -> None:
+            m_sel.Font.Name = "Aptos"
+            m_sel.Font.Size = 12
+            m_sel.Font.Bold = False
 
-    def _bold(text: str) -> None:
-        word_selection.Font.Bold = True
-        word_selection.TypeText(text)
-        word_selection.Font.Bold = False
+        def _bd(text: str) -> None:
+            m_sel.Font.Bold = True
+            m_sel.TypeText(text)
+            m_sel.Font.Bold = False
 
-    word_selection.HomeKey(Unit=6)  # wdStory = 6
-    _body_font()
+        m_sel.HomeKey(Unit=6)
+        _bf()
 
-    if is_friday and bka_data:
-        # ── Friday intro ──────────────────────────────────────────────────
-        for line in FRIDAY_INTRO.splitlines():
-            word_selection.TypeText(line)
-            word_selection.TypeParagraph()
-        word_selection.TypeParagraph()
+        if is_friday and bka_data:
+            # ── Friday intro ──────────────────────────────────────────────
+            for line in FRIDAY_INTRO.splitlines():
+                m_sel.TypeText(line)
+                m_sel.TypeParagraph()
+            m_sel.TypeParagraph()
 
-        _bold("Bundeskartellamt:")
-        word_selection.TypeParagraph()
-        word_selection.TypeParagraph()
+            _bd("Bundeskartellamt:")
+            m_sel.TypeParagraph()
+            m_sel.TypeParagraph()
 
-        _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
-                        "Produktbereich", "Abschluss"]
-        _BKA_KEYS    = ["datum", "aktenzeichen", "unternehmen",
-                        "produktbereich", "abschluss"]
-        tbl = mail_doc.Tables.Add(
-            Range=word_selection.Range,
-            NumRows=1 + len(bka_data),
-            NumColumns=len(_BKA_HEADERS),
-        )
+            _BKA_HEADERS = ["Datum", "Aktenzeichen", "Unternehmen",
+                            "Produktbereich", "Abschluss"]
+            _BKA_KEYS    = ["datum", "aktenzeichen", "unternehmen",
+                            "produktbereich", "abschluss"]
+            tbl = m_doc.Tables.Add(
+                Range=m_sel.Range,
+                NumRows=1 + len(bka_data),
+                NumColumns=len(_BKA_HEADERS),
+            )
 
-        _DARK_BLUE = 0x68 * 65536
-        _WHITE     = 0xFF + 0xFF * 256 + 0xFF * 65536
-        for j, h in enumerate(_BKA_HEADERS, 1):
-            cell = tbl.Cell(1, j)
-            cell.Range.Text = h
-            cell.Range.Font.Bold = True
-            cell.Range.Font.Color = _WHITE
-            cell.Shading.BackgroundPatternColor = _DARK_BLUE
+            _DARK_BLUE = 0x68 * 65536
+            _WHITE     = 0xFF + 0xFF * 256 + 0xFF * 65536
+            for j, h in enumerate(_BKA_HEADERS, 1):
+                cell = tbl.Cell(1, j)
+                cell.Range.Text = h
+                cell.Range.Font.Bold = True
+                cell.Range.Font.Color = _WHITE
+                cell.Shading.BackgroundPatternColor = _DARK_BLUE
 
-        for i, row in enumerate(bka_data, 2):
-            for j, key in enumerate(_BKA_KEYS, 1):
-                tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
+            for i, row in enumerate(bka_data, 2):
+                for j, key in enumerate(_BKA_KEYS, 1):
+                    tbl.Cell(i, j).Range.Text = str(row.get(key, ""))
 
-        _col_width_pt = mail_doc.Application.PixelsToPoints(550, False)
-        tbl.Columns(3).Width = _col_width_pt
-        tbl.Columns(4).Width = _col_width_pt
-        tbl.Borders.OutsideLineStyle = 1
-        tbl.Borders.OutsideColor = 0
-        for _row_idx in range(1, tbl.Rows.Count + 1):
-            for _col_idx in range(1, tbl.Columns.Count + 1):
-                _cell = tbl.Cell(_row_idx, _col_idx)
-                _cell.Borders(3).LineStyle = 1  # bottom border per cell
-                _cell.Borders(3).Color = 0
+            _col_width_pt = m_doc.Application.PixelsToPoints(550, False)
+            tbl.Columns(3).Width = _col_width_pt
+            tbl.Columns(4).Width = _col_width_pt
+            tbl.Borders.OutsideLineStyle = 1
+            tbl.Borders.OutsideColor = 0
+            for _ri in range(1, tbl.Rows.Count + 1):
+                for _ci in range(1, tbl.Columns.Count + 1):
+                    _c = tbl.Cell(_ri, _ci)
+                    _c.Borders(3).LineStyle = 1
+                    _c.Borders(3).Color = 0
 
-        # Position cursor right after the table (not at doc end, so sig stays at end)
-        mail_doc.Range(tbl.Range.End, tbl.Range.End).Select()
-        word_selection.TypeParagraph()
-        word_selection.TypeParagraph()
-        _body_font()
+            m_doc.Range(tbl.Range.End, tbl.Range.End).Select()
+            m_sel.TypeParagraph()
+            m_sel.TypeParagraph()
+            _bf()
 
-        _bold("Mergermarket:")
-        word_selection.TypeParagraph()
-        _body_font()
+            _bd("Mergermarket:")
+            m_sel.TypeParagraph()
+            _bf()
 
-    else:
-        # ── Normal day intro ──────────────────────────────────────────────
-        for line in EMAIL_INTRO.splitlines():
-            if line == "Mergermarket:":
-                _bold(line)
-            else:
-                word_selection.TypeText(line)
-            word_selection.TypeParagraph()
-        _body_font()
+        else:
+            # ── Normal day intro ──────────────────────────────────────────
+            for line in EMAIL_INTRO.splitlines():
+                if line == "Mergermarket:":
+                    _bd(line)
+                else:
+                    m_sel.TypeText(line)
+                m_sel.TypeParagraph()
+            _bf()
 
-    # ── Paste Word document content ───────────────────────────────────────
-    source_doc.Content.Copy()
-    word_selection.Paste()
-    word_selection.Collapse(Direction=0)  # collapse to end of pasted content
+        # ── Paste Word document content ───────────────────────────────────
+        source_doc.Content.Copy()
+        m_sel.Paste()
+        m_sel.Collapse(Direction=0)
 
-    # Clear the clipboard so Word doesn't ask to keep large clipboard contents
+        # ── Closing ───────────────────────────────────────────────────────
+        m_sel.TypeParagraph()
+        m_sel.TypeText("Beste Grüße")
+        m_sel.TypeParagraph()
+        m_sel.TypeText(first_name)
+        m_sel.TypeParagraph()
+
+    # ── Build first email body ────────────────────────────────────────────
+    _build_body_content(mail_doc, word_selection)
+
+    # ── Second email as draft (ABN AMRO distribution list) ───────────────
+    _ABN_AMRO_RECIPIENTS = [
+        "quirin.mueller@de.abnamro.com",
+        "matthias.schoenig@de.abnamro.com",
+        "rico.baumann@de.abnamro.com",
+        "etienne.reichelt@de.abnamro.com",
+        "jan.zilch@nl.abnamro.com",
+        "melanie.potzschke@nl.abnamro.com",
+        "gamze.sevimli@de.abnamro.com",
+        "jasper.duerr@de.abnamro.com",
+        "andreas.weigel@de.abnamro.com",
+        "frank.zierke@bethmannbank.de",
+        "tim.pankoke@de.abnamro.com",
+        "christian.kotzan@de.abnamro.com",
+        "patrick.laguzov@de.abnamro.com",
+        "evgeni.lokschin@de.abnamro.com",
+        "stefanie.ries@de.abnamro.com",
+        "marco.samii@de.abnamro.com",
+        "laurens.van.wissen@de.abnamro.com",
+        "tobias.schmitt@de.abnamro.com",
+        "melanie.serba@de.abnamro.com",
+        "michele.burgio@de.abnamro.com",
+        "EandE@de.abnamro.com",
+        "christian.schmidt@de.abnamro.com",
+        "nassim.el.mahyaoui@de.abnamro.com",
+        "klaus.hetzer@de.abnamro.com",
+        "georg.riehle@de.abnamro.com",
+        "phillip.katsamperoglou@de.abnamro.com",
+        "emma.gravendeel@de.abnamro.com",
+        "maximilian.lankes@de.abnamro.com",
+        "sibylle.haecker@de.abnamro.com",
+        "christian.saecherl@de.abnamro.com",
+        "leon.kinzel@de.abnamro.com",
+        "torsten.mueller@de.abnamro.com",
+        "glebs.ivanovs@de.abnamro.com",
+        "martino.lombardo@de.abnamro.com",
+        "lena.frank@de.abnamro.com",
+        "henry.upmeyer@de.abnamro.com",
+        "leon.mikanovic@de.abnamro.com",
+        "christian.franzmann@de.abnamro.com",
+        "robert.thimm@de.abnamro.com",
+        "sven.ingenohl@de.abnamro.com",
+        "martin.drosdek@de.abnamro.com",
+        "anastasia.kozina@de.abnamro.com",
+        "angela.jonas@de.abnamro.com",
+        "olympia.tzima@de.abnamro.com",
+        "paivi.borre@de.abnamro.com",
+        "sandra.knorr@de.abnamro.com",
+        "michael.schmidt@de.abnamro.com",
+        "christopher.binder@nl.abnamro.com",
+    ]
+    mail2 = outlook.CreateItem(0)
+    mail2.Subject = subject
+    for addr in _ABN_AMRO_RECIPIENTS:
+        r2 = mail2.Recipients.Add(addr)
+        r2.Resolve()
+
+    mail2.Display()
+    mail2_doc = mail2.GetInspector.WordEditor
+    mail2_sel = mail2_doc.Application.Selection
+    _build_body_content(mail2_doc, mail2_sel)
+
+    # ── Cleanup: clear clipboard and close source Word document ──────────
     import subprocess as _sub
     _sub.run(
         ["powershell", "-command", "Set-Clipboard -Value $null"],
@@ -1386,15 +1465,6 @@ def compose_outlook_email(
     source_doc.Close(SaveChanges=False)
     if word_app.Documents.Count == 0:
         word_app.Quit()
-
-    # ── Closing signature ─────────────────────────────────────────────────
-    # No EndKey(Unit=6) here — cursor is already after pasted content and
-    # before the auto-signature, which remains at the document end.
-    word_selection.TypeParagraph()
-    word_selection.TypeText("Beste Grüße")
-    word_selection.TypeParagraph()
-    word_selection.TypeText(first_name)
-    word_selection.TypeParagraph()
 
     if auto_send:
         mail.Send()
