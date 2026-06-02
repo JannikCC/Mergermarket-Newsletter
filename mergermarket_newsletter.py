@@ -1492,12 +1492,13 @@ def run(
     auto_send: bool = False,
     hours: int | None = None,
     date_to: date | None = None,
+    date_overridden: bool = False,
 ) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    is_friday = force_friday or (run_date.weekday() == 4)
+    is_friday = force_friday or (run_date.weekday() == 4 and not date_overridden)
     if is_friday:
         log.info("Friday mode active — BKA scraping enabled.")
 
@@ -1592,6 +1593,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
+    date_overridden = args.date is not None
     date_to = (
         datetime.strptime(args.date_to, "%Y-%m-%d").date()
         if args.date_to else None
@@ -1601,10 +1603,11 @@ def main() -> None:
     if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
             force_friday=args.friday, auto_send=args.send, hours=args.hours,
-            date_to=date_to)
+            date_to=date_to, date_overridden=date_overridden)
     else:
         run(run_date, headless=args.headless, force_friday=args.friday,
-            auto_send=args.send, hours=args.hours, date_to=date_to)
+            auto_send=args.send, hours=args.hours, date_to=date_to,
+            date_overridden=date_overridden)
 
 
 if __name__ == "__main__":
