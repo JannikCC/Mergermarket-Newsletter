@@ -113,9 +113,11 @@ def _last_working_day(d: date, hols) -> date:
 def get_date_range(
     run_date: date,
     hours: int | None = None,
+    date_to: date | None = None,
 ) -> tuple[Optional[date], Optional[date]]:
     """Return (date_from, date_to) with German/Hessian holiday awareness.
 
+    --date + --date-to → exact manual range, no weekday/holiday logic
     --hours X  → last X hours (overrides weekday logic)
     Monday     → last Friday (or earlier if holiday) through Monday
     Tuesday after holiday Monday → same range as Monday, shifted one day
@@ -131,6 +133,9 @@ def get_date_range(
     except ImportError:
         log.warning("'holidays' package not installed — holiday awareness disabled.")
         hols = {}
+
+    if date_to is not None and hours is None:
+        return run_date, date_to
 
     if hours is not None:
         from datetime import datetime as _dt
@@ -295,6 +300,7 @@ def download_mergermarket_report(
     headless: bool = False,
     is_friday: bool = False,
     hours: int | None = None,
+    date_to: date | None = None,
 ) -> tuple[Path, list[dict]]:
     """
     Navigate Mergermarket via Playwright, configure the search, and download
@@ -314,7 +320,7 @@ def download_mergermarket_report(
 
     mm_user = os.environ.get("MM_USERNAME", "")
     mm_pass = os.environ.get("MM_PASSWORD", "")
-    date_from, date_to = get_date_range(run_date, hours=hours)
+    date_from, date_to = get_date_range(run_date, hours=hours, date_to=date_to)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -1485,6 +1491,7 @@ def run(
     force_friday: bool = False,
     auto_send: bool = False,
     hours: int | None = None,
+    date_to: date | None = None,
 ) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1505,7 +1512,8 @@ def run(
             log.info(f"[DRY-RUN] Skipping browser download; using: {raw_xlsx}")
         else:
             raw_xlsx, bka_data = download_mergermarket_report(
-                run_date, raw_xlsx, headless=headless, is_friday=is_friday, hours=hours
+                run_date, raw_xlsx, headless=headless, is_friday=is_friday,
+                hours=hours, date_to=date_to,
             )
 
         # ── Step 2: Parse ────────────────────────────────────────────────────
@@ -1576,17 +1584,27 @@ def main() -> None:
         metavar="N",
         help="Override date range: use the last N hours instead of the weekday-based logic.",
     )
+    parser.add_argument(
+        "--date-to",
+        metavar="YYYY-MM-DD",
+        help="Set Date To explicitly. When combined with --date, overrides all weekday/holiday logic.",
+    )
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
+    date_to = (
+        datetime.strptime(args.date_to, "%Y-%m-%d").date()
+        if args.date_to else None
+    )
     log.info(f"=== Mergermarket Newsletter  {run_date}  ({'Monday' if run_date.weekday() == 0 else run_date.strftime('%A')}) ===")
 
     if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
-            force_friday=args.friday, auto_send=args.send, hours=args.hours)
+            force_friday=args.friday, auto_send=args.send, hours=args.hours,
+            date_to=date_to)
     else:
         run(run_date, headless=args.headless, force_friday=args.friday,
-            auto_send=args.send, hours=args.hours)
+            auto_send=args.send, hours=args.hours, date_to=date_to)
 
 
 if __name__ == "__main__":
