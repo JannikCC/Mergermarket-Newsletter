@@ -1485,10 +1485,20 @@ def run(
     force_friday: bool = False,
     auto_send: bool = False,
     hours: int | None = None,
+    manual_run: bool = False,
 ) -> None:
     today_str = run_date.strftime("%Y%m%d")
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not manual_run:
+        try:
+            import holidays as _hols
+            if run_date in _hols.country_holidays("DE", subdiv="HE", years=[run_date.year]):
+                log.info("Today is a public holiday — skipping newsletter generation.")
+                return
+        except ImportError:
+            pass
 
     is_friday = force_friday or (run_date.weekday() == 4)
     if is_friday:
@@ -1579,14 +1589,16 @@ def main() -> None:
     args = parser.parse_args()
 
     run_date = get_run_date(args.date)
+    manual_run = bool(args.date or args.friday or args.hours)
     log.info(f"=== Mergermarket Newsletter  {run_date}  ({'Monday' if run_date.weekday() == 0 else run_date.strftime('%A')}) ===")
 
     if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
-            force_friday=args.friday, auto_send=args.send, hours=args.hours)
+            force_friday=args.friday, auto_send=args.send, hours=args.hours,
+            manual_run=manual_run)
     else:
         run(run_date, headless=args.headless, force_friday=args.friday,
-            auto_send=args.send, hours=args.hours)
+            auto_send=args.send, hours=args.hours, manual_run=manual_run)
 
 
 if __name__ == "__main__":
