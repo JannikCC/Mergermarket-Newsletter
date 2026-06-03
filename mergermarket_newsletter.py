@@ -1202,7 +1202,6 @@ def compose_outlook_email(
     *,
     bka_data: list[dict] | None = None,
     is_friday: bool = False,
-    auto_send: bool = False,
 ) -> None:
     """
     Create an Outlook MailItem with intro text, the Word document content
@@ -1466,11 +1465,7 @@ def compose_outlook_email(
     if word_app.Documents.Count == 0:
         word_app.Quit()
 
-    if auto_send:
-        mail.Send()
-        log.info("Email sent automatically.")
-    else:
-        log.info(f"Email displayed for manual review (signed as {first_name!r}).")
+    log.info(f"Email displayed for manual review (signed as {first_name!r}).")
 
 
 # ---------------------------------------------------------------------------
@@ -1483,7 +1478,6 @@ def run(
     dry_run_xlsx: Optional[Path] = None,
     headless: bool = False,
     force_friday: bool = False,
-    auto_send: bool = False,
     hours: int | None = None,
     manual_run: bool = False,
 ) -> None:
@@ -1533,7 +1527,7 @@ def run(
         # ── Step 4: Compose email ────────────────────────────────────────────
         compose_outlook_email(
             output_docx, run_date, bka_data=bka_data,
-            is_friday=is_friday, auto_send=auto_send,
+            is_friday=is_friday,
         )
 
     except Exception as exc:
@@ -1576,11 +1570,6 @@ def main() -> None:
         help="Force Friday mode: scrape Bundeskartellamt and use the extended email format.",
     )
     parser.add_argument(
-        "--send",
-        action="store_true",
-        help="Send the email automatically via mail.Send(). Without this flag the email is only displayed for manual review.",
-    )
-    parser.add_argument(
         "--hours",
         type=int,
         metavar="N",
@@ -1594,11 +1583,10 @@ def main() -> None:
 
     if args.dry_run:
         run(run_date, dry_run_xlsx=Path(args.dry_run), headless=args.headless,
-            force_friday=args.friday, auto_send=args.send, hours=args.hours,
-            manual_run=manual_run)
+            force_friday=args.friday, hours=args.hours, manual_run=manual_run)
     else:
         run(run_date, headless=args.headless, force_friday=args.friday,
-            auto_send=args.send, hours=args.hours, manual_run=manual_run)
+            hours=args.hours, manual_run=manual_run)
 
 
 if __name__ == "__main__":

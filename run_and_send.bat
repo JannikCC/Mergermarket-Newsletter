@@ -25,7 +25,7 @@ echo ========================================== >> "%LOG_FILE%"
 echo %DATE% %TIME% – Task Scheduler triggered   >> "%LOG_FILE%"
 echo ========================================== >> "%LOG_FILE%"
 
-py "%SCRIPT_DIR%mergermarket_newsletter.py" --send >> "%LOG_FILE%" 2>&1
+py "%SCRIPT_DIR%mergermarket_newsletter.py" >> "%LOG_FILE%" 2>&1
 
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Script exited with code %ERRORLEVEL% >> "%LOG_FILE%"
