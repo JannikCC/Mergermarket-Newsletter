@@ -384,7 +384,8 @@ def download_mergermarket_report(
                     f"See C:\\Temp\\mm_debug_03b_search_not_found.png"
                 )
 
-        page.wait_for_load_state("networkidle", timeout=30_000)
+        page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(2_000)
 
         # ── Download ─────────────────────────────────────────────────────────
         log.info("Initiating report download …")
