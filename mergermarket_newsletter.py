@@ -808,7 +808,8 @@ def _trigger_download(page, ctx, output_path: Path):
             "Open C:\\Temp\\mm_debug_04a_before_download_all.png"
         )
     log.info("Clicked 'Download all'")
-    page.wait_for_load_state("networkidle", timeout=15_000)
+    page.wait_for_load_state("domcontentloaded", timeout=15_000)
+    page.wait_for_timeout(2_000)
 
     # ── Step 2: click #btnUnformattedDownload ────────────────────────────────
     _dump_page_state(page, "04b_download_options")
