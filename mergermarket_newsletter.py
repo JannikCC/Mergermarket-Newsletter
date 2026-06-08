@@ -385,7 +385,7 @@ def download_mergermarket_report(
                 )
 
         page.wait_for_load_state("domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(2_000)
+        page.wait_for_timeout(3_000)
 
         # ── Download ─────────────────────────────────────────────────────────
         log.info("Initiating report download …")
