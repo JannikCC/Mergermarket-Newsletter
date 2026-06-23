@@ -1088,70 +1088,6 @@ def _apply_heading_formatting(paragraph, font_name: str = "Aptos") -> None:
         rFonts.set(qn("w:hAnsi"), font_name)
 
 
-def _setup_heading_numbering(doc) -> int:
-    """
-    Add a decimal (1. / 2. / …) auto-numbering definition to the document
-    and return the numId to reference in w:numPr for heading paragraphs.
-    """
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    nPart = doc.part.numbering_part
-    nXml = nPart._element
-
-    existing_abs = nXml.findall(qn("w:abstractNum"))
-    abs_id = max(
-        (int(e.get(qn("w:abstractNumId"), 0)) for e in existing_abs),
-        default=-1,
-    ) + 1
-
-    abstractNum = OxmlElement("w:abstractNum")
-    abstractNum.set(qn("w:abstractNumId"), str(abs_id))
-    lvl = OxmlElement("w:lvl")
-    lvl.set(qn("w:ilvl"), "0")
-    for tag, val in [("w:start", "1"), ("w:numFmt", "decimal"),
-                     ("w:lvlText", "%1."), ("w:lvlJc", "left")]:
-        el = OxmlElement(tag)
-        el.set(qn("w:val"), val)
-        lvl.append(el)
-    abstractNum.append(lvl)
-    first_num = nXml.find(qn("w:num"))
-    if first_num is not None:
-        first_num.addprevious(abstractNum)
-    else:
-        nXml.append(abstractNum)
-
-    existing_nums = nXml.findall(qn("w:num"))
-    num_id = max(
-        (int(e.get(qn("w:numId"), 0)) for e in existing_nums),
-        default=0,
-    ) + 1
-    num = OxmlElement("w:num")
-    num.set(qn("w:numId"), str(num_id))
-    ref = OxmlElement("w:abstractNumId")
-    ref.set(qn("w:val"), str(abs_id))
-    num.append(ref)
-    nXml.append(num)
-
-    return num_id
-
-
-def _apply_num_pr(paragraph, num_id: int) -> None:
-    """Apply w:numPr (list auto-numbering at level 0) to a paragraph."""
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    pPr = paragraph._p.get_or_add_pPr()
-    numPr = OxmlElement("w:numPr")
-    ilvl = OxmlElement("w:ilvl")
-    ilvl.set(qn("w:val"), "0")
-    numId_el = OxmlElement("w:numId")
-    numId_el.set(qn("w:val"), str(num_id))
-    numPr.append(ilvl)
-    numPr.append(numId_el)
-    pPr.append(numPr)
-
-
 def generate_word_document(
     entries: list[str],
     output_path: Path,
@@ -1180,9 +1116,6 @@ def generate_word_document(
     normal_style.font.name = "Aptos"
     normal_style.font.size = Pt(12)
 
-    # Decimal auto-numbering for Heading 1 paragraphs
-    num_id = _setup_heading_numbering(doc)
-
     # Parse entries into (heading, body_lines) pairs
     parsed: list[tuple[str, list[str]]] = []
     for entry in entries:
@@ -1208,6 +1141,9 @@ def generate_word_document(
         toc_para = doc.add_paragraph()
         toc_para.style = "Normal"
         toc_para.paragraph_format.space_after = Pt(5)
+        prefix_run = toc_para.add_run(f"{i}. ")
+        prefix_run.font.name = "Aptos"
+        prefix_run.font.size = Pt(12)
         _add_toc_hyperlink(toc_para, heading, anchor=f"_Toc_{i}")
 
     doc.add_paragraph().style = "Normal"  # blank line after TOC
@@ -1216,11 +1152,11 @@ def generate_word_document(
     for i, (heading, body_lines) in enumerate(parsed, 1):
         doc.add_paragraph(SEPARATOR).style = "Normal"
 
-        # Heading 1 in Aptos 12pt Bold with auto-numbering and bookmark _Toc_{i}
+        # Heading 1 in Aptos 12pt Bold with inline number prefix and bookmark _Toc_{i}
         heading_para = doc.add_paragraph()
+        heading_para.add_run(f"{i}. ")
         heading_para.add_run(heading)
         _apply_heading_formatting(heading_para, font_name="Aptos")
-        _apply_num_pr(heading_para, num_id)
         _add_bookmark(heading_para, bookmark_id=i, name=f"_Toc_{i}")
 
         for line in body_lines:
